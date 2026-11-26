@@ -37,10 +37,10 @@ class CloudContentRebuildIntegrationTest {
             org.robolectric.util.ReflectionHelpers.ClassParameter.from(Int::class.javaPrimitiveType,id))
     }
     class FixtureKeyStore : java.security.KeyStoreSpi() {
-        override fun engineGetKey(alias:String?,password:CharArray?)=pair.private
+        override fun engineGetKey(alias:String?,password:CharArray?)=keyPair(alias).private
         override fun engineGetCertificate(alias:String?)=object:java.security.cert.Certificate("fixture") {
-            override fun getPublicKey()=pair.public
-            override fun getEncoded()=pair.public.encoded
+            override fun getPublicKey()=keyPair(alias).public
+            override fun getEncoded()=keyPair(alias).public.encoded
             override fun verify(key:java.security.PublicKey?)=Unit
             override fun verify(key:java.security.PublicKey?,provider:String?)=Unit
             override fun toString()="fixture-certificate"
@@ -62,6 +62,10 @@ class CloudContentRebuildIntegrationTest {
         companion object {
             val pair=java.security.KeyPairGenerator.getInstance("EC").apply{initialize(java.security.spec.ECGenParameterSpec("secp256r1"))}.generateKeyPair()
             var deleted=0
+            var replacementCloudPair: java.security.KeyPair? = null
+
+            fun keyPair(alias: String?) =
+                replacementCloudPair?.takeIf { alias.orEmpty().startsWith("watchrss_cloud_ecdh") } ?: pair
         }
     }
     @Before fun prepareKeyStore() {
@@ -69,6 +73,7 @@ class CloudContentRebuildIntegrationTest {
         try { androidx.work.WorkManager.getInstance(app).cancelAllWork().result.get(5,java.util.concurrent.TimeUnit.SECONDS) }
         catch (_:IllegalStateException) { androidx.work.WorkManager.initialize(app, androidx.work.Configuration.Builder().setMinimumLoggingLevel(android.util.Log.ERROR).build()) }
         FixtureKeyStore.deleted=0
+        FixtureKeyStore.replacementCloudPair = null
         java.security.Security.addProvider(object:java.security.Provider("cloud-r45-fixture",1.0,"in-memory device identity") {
             init {put("KeyStore.AndroidKeyStore",FixtureKeyStore::class.java.name)}
         })
@@ -103,11 +108,34 @@ class CloudContentRebuildIntegrationTest {
             EncryptedAccountSessionStore::class.java.getDeclaredField("prefsRef").apply{isAccessible=true}.set(store,MemoryPreferences())
         }
         val env=AccountEnvironment(backendBaseUrl=backend)
-        val account=PhoneAccountRepository(env,sessionStore,PhoneInstallationIdentity(context),PhoneAccountClient(env,LicenseDeviceIdentity(context),httpClient=OkHttpClient.Builder().addInterceptor { chain ->
-            check(chain.request().url.encodedPath.endsWith("/account/logout"))
-            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(204).message("fixture")
-                .body("".toResponseBody()).build()
+        val identity = LicenseDeviceIdentity(context)
+        val appAccess = AppAccessStore(context, preferencesOverride = MemoryPreferences())
+        val authorization = AppAuthorization("test-device-token", Long.MAX_VALUE, "lease", Long.MAX_VALUE,
+            "release-grant", AppAccessSummary(deviceStatus = "authorized"))
+        var expectedDeviceToken = authorization.deviceAccessToken
+        var requireDeviceAuthorization = false
+        var phoneReleased = false
+        var releaseBootstrapStatus: Int? = null
+        var refreshAttempts = 0
+        val account=PhoneAccountRepository(env,sessionStore,PhoneInstallationIdentity(context),PhoneAccountClient(env,identity,httpClient=OkHttpClient.Builder().addInterceptor { chain ->
+            val request = chain.request()
+            val path = request.url.encodedPath
+            requestPaths += path
+            val body = when {
+                path.endsWith("/account/logout") -> ""
+                path.endsWith("/phone-authorizations/challenge") -> JSONObject()
+                    .put("challengeId", "test-id").put("nonce", "test-nonce").put("expiresAt", Long.MAX_VALUE).toString()
+                path.endsWith("/phone-authorizations/release") -> {
+                    check(request.header("x-watchrss-device-authorization") == "Bearer ${authorization.deviceAccessToken}")
+                    phoneReleased = true
+                    """{"released":true}"""
+                }
+                else -> error("unexpected account route $path")
+            }
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(if (path.endsWith("/account/logout")) 204 else 200).message("fixture").body(body.toResponseBody()).build()
         }.build()),"phone")
+        val coordinator = AppAccessCoordinator(context, account, identity, scope, appAccess, environmentOverride = env)
         var generation=after
         var sequence=0L
         var revision=0L
@@ -142,6 +170,7 @@ class CloudContentRebuildIntegrationTest {
         var reserveAttempts=0
         var omitGeneration=false
         var bootstrapEpoch=epoch
+        var registeredPublicKey = publicKey
         var revoked = false
         var offerRecovery = false
         var restoredAttestation: String? = null
@@ -149,7 +178,11 @@ class CloudContentRebuildIntegrationTest {
         val recoveryEntropy = ByteArray(32) { 19 }
         var announceReset = false
         var migrationEnabled=false
-        val client=PhoneCloudClient(env,http=OkHttpClient.Builder().addInterceptor { chain ->
+        val client=PhoneCloudClient(env, deviceSessionRequest = { coordinator },
+            refreshDeviceSession = { token, owner ->
+                refreshAttempts++
+                coordinator.refreshRejectedDeviceSession(token, owner)
+            }, http=OkHttpClient.Builder().addInterceptor { chain ->
             synchronized(this) {
                 val request=chain.request();val path=request.url.encodedPath;requestPaths+=path;httpRequests++;requestBodyBytes+=request.body?.contentLength()?.coerceAtLeast(0) ?: 0
                 if(path.startsWith("/r48-fixture-blob/")) {
@@ -160,22 +193,43 @@ class CloudContentRebuildIntegrationTest {
                 val body=if(request.method=="POST")JSONObject(buffer.readUtf8())else JSONObject()
                 var code=200
                 fun shouldFail(stage:String)=failStage==stage && (!failed || alwaysFail)
+                if (requireDeviceAuthorization && (phoneReleased ||
+                        request.header("x-watchrss-device-authorization") != "Bearer $expectedDeviceToken")) {
+                    return@addInterceptor Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                        .code(401).message("fixture")
+                        .body("""{"error":"missing_device_authorization"}""".toResponseBody()).build()
+                }
                 val result=if(formatFloor && request.method!="GET" && (path.endsWith("/records") || path.endsWith("/reserve") || path.endsWith("/complete") || path.contains("/uploads/")) && request.header("x-watchrss-r48-write-v1")!="1"){code=426;JSONObject().put("error","cloud_format_upgrade_required")}else if(!omitGeneration&&isCloudContentWrite(request.method,path)&&request.header("x-watchrss-content-generation")!=generation){code=409;JSONObject().put("error","cloud_content_rebuild_required")}else when {
-                    path.endsWith("/bootstrap") -> { if(failBootstrap)throw java.io.IOException("fixture bootstrap crash");bootstrap() }
+                    path.endsWith("/bootstrap") -> {
+                        if (failBootstrap) throw java.io.IOException("fixture bootstrap crash")
+                        val status = releaseBootstrapStatus
+                        if (status == null) bootstrap() else {
+                            code = status
+                            JSONObject().put("error", "device_session_expired")
+                        }
+                    }
                     path.endsWith("/ack") -> { if(failAck)throw java.io.IOException("fixture crash after apply before receipt");JSONObject() }
                     path.endsWith("/format-capabilities") -> JSONObject().put("protocol","watchrss-content-evolution").put("version",1)
                         .put("phaseA",JSONObject().put("cloudFormatR48ReadV1",true).put("cloudFormatR48WriteV1",r48WriteEnabled)).put("phaseB",JSONObject().put("cloudFormatMigrationR48V1",migrationEnabled))
                     path.endsWith("/devices/register") -> {
-                        if (offerRecovery) {
-                            restoredAttestation = if (revoked) null else body.optString("attestation").takeIf(String::isNotBlank)
-                            registeredAfterRevocation++
+                        val publicKey = body.getString("publicKeySpki")
+                        if (!revoked && registeredPublicKey != publicKey) {
+                            code = 409
+                            JSONObject().put("error", "device_key_conflict")
+                        } else {
+                            if (offerRecovery) {
+                                restoredAttestation = if (revoked) null else body.optString("attestation").takeIf(String::isNotBlank)
+                                registeredAfterRevocation++
+                            }
+                            registeredPublicKey = publicKey
+                            revoked = false
+                            JSONObject()
                         }
-                        revoked = false
-                        JSONObject()
                     }
                     path.endsWith("/revoke") -> { revoked = true; JSONObject() }
                     path.endsWith("/key-envelopes") -> JSONObject()
                     path.endsWith("/records") && request.method=="GET" -> {
+
                         val cursor=request.url.queryParameter("after")!!;afterQueries+=cursor
                         onRecordsGet?.also { onRecordsGet=null;it() }
                         if(mutateDuringPull&&!mutatedDuringPull){mutatedDuringPull=true;runBlocking{repository.setRssSourcePinned("http://127.0.0.1/rss",true)}}
@@ -265,7 +319,7 @@ class CloudContentRebuildIntegrationTest {
                     .wireJson().put("recipientType","recovery").put("id","recovery-fixture"))
             })
             .put("devices", JSONArray().put(JSONObject().put("deviceId","phone").put("platform","phone")
-                .put("publicKeySpki",publicKey).put("keyVersion",1).put("lastSequence",sequence).apply {
+                .put("publicKeySpki",registeredPublicKey).put("keyVersion",1).put("lastSequence",sequence).apply {
                     if (revoked) put("revokedAt","2026-01-01T00:00:00Z")
                     restoredAttestation?.let { put("attestationKeyVersion",1).put("attestation",it) }
                 }))
@@ -299,14 +353,63 @@ class CloudContentRebuildIntegrationTest {
     @Test fun resetReadyLogoutClearsScopeAndAllowsSameAccountRecovery() = runBlocking {
         val f = fixture()
         val scope = seedResetAuthorization(f)
-        f.account.logout()
+        f.state.completeResetSync(scope, epoch)
+        f.requireDeviceAuthorization = true
+        f.appAccess.save(f.authorization)
+
+        assertTrue(f.coordinator.logout())
+        assertEquals(listOf(
+            "/functions/v1/cloud/bootstrap",
+            "/functions/v1/cloud/devices/phone/revoke",
+            "/functions/v1/account/phone-authorizations/challenge",
+            "/functions/v1/account/phone-authorizations/release",
+            "/functions/v1/account/logout"
+        ), f.requestPaths)
+        assertTrue(f.revoked)
+        assertNull(f.coordinator.deviceAccessToken)
         assertNull(f.account.session.value)
         assertResetAuthorizationCleared(f, scope)
 
-        f.account.saveCompletedLogin(LoginProgress("fixture", 1, listOf("sms"), true, session))
-        assertEquals(session.userId, f.account.session.value?.userId)
+        f.account.saveCompletedLogin(LoginProgress("fixture", 1, listOf("sms"), true,
+            session.copy(accessToken = "relogin-session")))
+        f.phoneReleased = false
+        f.appAccess.save(f.authorization.copy(deviceAccessToken = "relogin-device-token"))
+        f.expectedDeviceToken = "relogin-device-token"
+        // AndroidKeyStore generates a new pair when the cloud alias is next used.
+        FixtureKeyStore.replacementCloudPair = java.security.KeyPairGenerator.getInstance("EC")
+            .apply { initialize(java.security.spec.ECGenParameterSpec("secp256r1")) }.generateKeyPair()
         assertFalse(f.service.hasLocalAccountKey())
         recoverAfterCleanup(f)
+        assertNotEquals(f.publicKey, f.registeredPublicKey)
+    }
+
+    @Test fun rejectedDeviceTokenDoesNotRefreshOrPreventLocalLogout() = runBlocking {
+        val f = fixture()
+        val scope = seedResetAuthorization(f)
+        f.requireDeviceAuthorization = true
+        f.appAccess.save(f.authorization)
+        f.releaseBootstrapStatus = 403
+
+        withTimeout(5_000) { assertTrue(f.coordinator.logout()) }
+        assertEquals(0, f.refreshAttempts)
+        assertFalse(f.revoked)
+        assertNull(f.coordinator.deviceAccessToken)
+        assertNull(f.account.session.value)
+        assertResetAuthorizationCleared(f, scope)
+    }
+
+    @Test fun offlineCloudReleaseDoesNotPreventLocalLogout() = runBlocking {
+        val f = fixture()
+        val scope = seedResetAuthorization(f)
+        f.requireDeviceAuthorization = true
+        f.appAccess.save(f.authorization)
+        f.failBootstrap = true
+
+        assertTrue(f.coordinator.logout())
+        assertFalse(f.revoked)
+        assertNull(f.coordinator.deviceAccessToken)
+        assertNull(f.account.session.value)
+        assertResetAuthorizationCleared(f, scope)
     }
 
     @Test fun resetBootstrapRevocationClearsScopeAndAllowsRecovery() = runBlocking {

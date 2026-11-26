@@ -281,6 +281,9 @@ class PhoneAccountRepository(
         val current = session.value
         check(current.hasSameSessionCredentials(expected)) { "账号已变更，请重试" }
         withDepartingCloudOwner(current) {
+            sessionStore.revokeB2Authorization()
+            // Revoke the cloud device while the phone authorization is still available.
+            current?.let { runCatching { onReleaseCloudAuthorization(it.copy(authenticationPaused = false)) } }
             val result = beforeLogout()
             logoutSession(current)
             result
@@ -288,9 +291,6 @@ class PhoneAccountRepository(
     }
 
     private suspend fun logoutSession(current: PhoneAccountSession?) {
-        sessionStore.revokeB2Authorization()
-        // Explicit logout is revocation, not a new authenticated product operation.
-        current?.let { runCatching { onReleaseCloudAuthorization(it.copy(authenticationPaused = false)) } }
         if (current != null && !current.isExpired) {
             val queued = runCatching { sessionStore.queueRevocation(current) }.isSuccess
             val revoked = runCatching { accountClient.logout(current) }.isSuccess

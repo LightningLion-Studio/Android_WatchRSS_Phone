@@ -449,12 +449,12 @@ class PhoneCloudSyncService(
         }
     }
     internal suspend fun releaseCloudAuthorization(session: PhoneAccountSession) =
-        withContext(releasingCloudAuthorization.asContextElement(true)) {
+        withContext(releasingCloudAuthorization.asContextElement(true) + CloudAuthorizationRelease) {
             syncV2Product.release()
             releaseCloudDevice(
                 revokeRemote = {
-                    val bootstrap = runCatching { client.bootstrap(session) }.getOrNull()
-                    val expectedEpoch = bootstrap?.libraryEpoch ?: client.knownEpoch(session)
+                    val bootstrap = runCatching { client.bootstrap(session, observeResult = false) }.getOrNull()
+                    val expectedEpoch = bootstrap?.libraryEpoch?.takeIf(String::isNotBlank) ?: client.knownEpoch(session)
                     if (expectedEpoch != null) {
                         runCatching { client.revokeDevice(session, deviceId, expectedEpoch) }
                         legacyDeviceId?.takeIf { it != deviceId }?.let { legacy ->

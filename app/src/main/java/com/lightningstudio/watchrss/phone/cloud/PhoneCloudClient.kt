@@ -22,6 +22,12 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
+
+internal object CloudAuthorizationRelease : AbstractCoroutineContextElement(Key) {
+    object Key : CoroutineContext.Key<CloudAuthorizationRelease>
+}
 
 /** Holds the current device session while a cloud request uses it. */
 interface CloudDeviceSessionRequest {
@@ -705,7 +711,9 @@ class PhoneCloudClient(
         }
         var response = attempt()
         val rejected = response.request.header("x-watchrss-device-authorization")?.removePrefix("Bearer ")
-        if (!resetExecute && response.code == 403 && rejected != null && isRefreshableCloudDeviceSessionError(
+        // Logout holds the phone authorization lock and uses the existing device session.
+        if (!resetExecute && currentCoroutineContext()[CloudAuthorizationRelease.Key] == null &&
+            response.code == 403 && rejected != null && isRefreshableCloudDeviceSessionError(
                 runCatching { JSONObject(response.peekBody(4096).string()).optString("error") }.getOrDefault("")
             )) {
             response.close()

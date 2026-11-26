@@ -176,7 +176,7 @@ internal class SyncV2CloudClient(
                     }
                     429 -> {
                         val retry = response.header("Retry-After")?.toLongOrNull()
-                            ?.takeIf { it >= 0 }?.coerceAtMost(300)?.times(1_000)
+                            ?.takeIf { it >= 0 }?.coerceAtMost(Long.MAX_VALUE / 1_000)?.times(1_000)
                             ?: response.headers.getDate("Retry-After")?.let {
                                 (it.time - System.currentTimeMillis()).coerceAtLeast(0)
                             }

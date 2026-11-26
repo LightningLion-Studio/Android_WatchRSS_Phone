@@ -58,7 +58,7 @@ internal class PhoneCloudChangeScheduler(
 }
 
 private const val LEGACY_CHANGE_INTERVAL_MS = 10 * 60 * 1_000L
-private const val FAST_CHANGE_INTERVAL_MS = 3_000L
+private const val FAST_CHANGE_INTERVAL_MS = 1_500L
 
 @OptIn(ExperimentalCoroutinesApi::class)
 internal fun debounceCloudChanges(

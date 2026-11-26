@@ -1,6 +1,8 @@
 package com.lightningstudio.watchrss.phone.cloud
 
 import android.app.Application
+import com.lightningstudio.watchrss.phone.cloud.CloudHeadSyncOutcome.COMPLETE
+import com.lightningstudio.watchrss.phone.cloud.CloudHeadSyncOutcome.RETRY
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
@@ -8,6 +10,7 @@ import java.io.IOException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
@@ -74,7 +77,7 @@ class PhoneCloudHeadPollerTest {
         }
     }
 
-    @Test fun rateLimitAndNetworkFailuresBackOffAndCapAtFiveMinutes() = runTest {
+    @Test fun serverRetryDelaySurvivesBackgroundAndLocalBackoffStaysCapped() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {
             val owner = Owner()
@@ -89,17 +92,29 @@ class PhoneCloudHeadPollerTest {
                             1 -> CloudHeadReply.RateLimited(43_000)
                             2 -> throw IOException("Offline")
                             3 -> CloudHeadReply.RateLimited(999_999)
-                            4 -> CloudHeadReply.Head("tag", 35_000)
-                            else -> CloudHeadReply.Unchanged
+                            in 4..8 -> throw IOException("Offline")
+                            else -> CloudHeadReply.Head("tag", 35_000)
                         }
-                    }, { true }, { false })
+                    }, { COMPLETE }, { false })
                 }
             }
             runCurrent()
             advanceTimeBy(42_999)
             assertEquals(listOf(0L), requests)
-            advanceTimeBy(1_000_000)
-            assertEquals(listOf(0L, 43_000, 83_000, 383_000, 418_000, 453_000), requests.take(6))
+            advanceTimeBy(40_001)
+            runCurrent()
+            assertEquals(listOf(0L, 43_000, 83_000), requests)
+            owner.lifecycle.currentState = Lifecycle.State.CREATED
+            runCurrent()
+            advanceTimeBy(500_000)
+            owner.lifecycle.currentState = Lifecycle.State.STARTED
+            runCurrent()
+            advanceTimeBy(499_999)
+            assertEquals(listOf(0L, 43_000, 83_000), requests)
+            runCurrent()
+            assertEquals(1_082_999L, requests.last())
+            advanceTimeBy(1_520_000)
+            assertEquals(listOf(1_082_999L, 1_242_999, 1_542_999, 1_842_999, 2_142_999, 2_442_999, 2_477_999), requests.drop(3).take(7))
             owner.lifecycle.currentState = Lifecycle.State.DESTROYED
             job.join()
         } finally {
@@ -119,7 +134,7 @@ class PhoneCloudHeadPollerTest {
                     poller.check(listOf("account"), {
                         tags += it
                         if (tags.size == 2) CloudHeadReply.Disabled else CloudHeadReply.Head("tag", null)
-                    }, { true }, { false })
+                    }, { COMPLETE }, { false })
                 }
             }
             runCurrent()
@@ -146,14 +161,65 @@ class PhoneCloudHeadPollerTest {
             poller.check(listOf(account), {
                 assertEquals(expectedTag, it)
                 CloudHeadReply.Head("tag", null)
-            }, { completed }, { false })
+            }, { if (completed) COMPLETE else RETRY }, { false })
         check("first", null, false)
         check("first", null, true)
         check("first", "tag", true)
         check("second", null, true)
     }
 
-    @Test fun editsPublishAfterThreeQuietSecondsAndCoalesce() = runTest {
+    @Test fun worstPollPhaseLeavesThreeSecondsForTransferAndRendering() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val edits = MutableSharedFlow<Long>()
+            val owner = Owner()
+            var published = false
+            var publishedAt = -1L
+            var displayedAt = -1L
+            val polls = mutableListOf<Long>()
+            // Exercise the upper jitter bound, including a positive sample from the old range.
+            val poller = PhoneCloudHeadPoller({ testScheduler.currentTime }, { 2_000 })
+            backgroundScope.launch {
+                debounceCloudChanges(edits, flowOf(true)) { testScheduler.currentTime }.collect {
+                    // Give the sender 500 ms to publish after the debounce.
+                    delay(500)
+                    publishedAt = testScheduler.currentTime
+                    published = true
+                }
+            }
+            backgroundScope.launch {
+                // The receiver checks the old head 1 ms before the publication.
+                delay(1_999)
+                owner.lifecycle.currentState = Lifecycle.State.STARTED
+                poller.run(owner.lifecycle, flowOf(true)) {
+                    poller.check(listOf("account"), { confirmed ->
+                        polls += testScheduler.currentTime
+                        val tag = if (published) "new" else "old"
+                        if (!published) delay(500)
+                        if (tag == confirmed) CloudHeadReply.Unchanged else CloudHeadReply.Head(tag, 20_000)
+                    }, {
+                        if (published) {
+                            // Spend the remaining 2 s on fetch, apply and rendering.
+                            delay(2_000)
+                            displayedAt = testScheduler.currentTime
+                        }
+                        COMPLETE
+                    }, { false })
+                }
+            }
+            runCurrent()
+            edits.emit(1)
+            advanceTimeBy(25_000)
+            runCurrent()
+            assertEquals(2_000L, publishedAt)
+            assertEquals(listOf(1_999L, 22_499L), polls)
+            assertEquals(24_499L, displayedAt)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test fun editsPublishAfterOneAndAHalfQuietSecondsAndCoalesce() = runTest {
         val edits = MutableSharedFlow<Long>()
         val mode = MutableStateFlow(true)
         val published = mutableListOf<Pair<Long, Long>>()
@@ -163,13 +229,13 @@ class PhoneCloudHeadPollerTest {
         }
         runCurrent()
         edits.emit(1)
-        advanceTimeBy(2_000)
+        advanceTimeBy(1_000)
         edits.emit(2)
-        advanceTimeBy(2_999)
+        advanceTimeBy(1_499)
         assertTrue(published.isEmpty())
         advanceTimeBy(1)
         runCurrent()
-        assertEquals(listOf(2L to 5_000L), published)
+        assertEquals(listOf(2L to 2_500L), published)
 
         mode.value = false
         runCurrent()
@@ -178,6 +244,6 @@ class PhoneCloudHeadPollerTest {
         assertEquals(1, published.size)
         advanceTimeBy(1)
         runCurrent()
-        assertEquals(listOf(2L to 5_000L, 3L to 605_000L), published)
+        assertEquals(listOf(2L to 2_500L, 3L to 602_500L), published)
     }
 }

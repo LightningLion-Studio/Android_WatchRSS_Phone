@@ -56,7 +56,7 @@ class FeatureDebugActivity : ComponentActivity() {
             WatchRssPhoneTheme {
                 repository.changes.collectAsState(initial = null).value
                 container.accountRepository.session.collectAsState().value
-                container.cloudSyncService.localKeyChanges.collectAsState().value
+                container.cloudSyncService.cloudEntryChanges.collectAsState(initial = 0L).value
                 val snapshot = repository.debugSnapshot()
                 val scope = rememberCoroutineScope()
                 val overrideWrites = remember { Mutex() }
@@ -83,9 +83,10 @@ class FeatureDebugActivity : ComponentActivity() {
                             }
                         }) { Text(if (refreshing) "正在刷新…" else "刷新云控") }
                         FeatureRegistry.entries.zip(snapshot.features).forEach { (feature, state) ->
-                            val alreadyEnabled = feature == FeatureRegistry.cloudSyncEntry &&
-                                container.cloudSyncService.hasLocalAccountKey()
-                            FeatureDebugCard(state, enabled = alreadyEnabled || state.enabled) { override ->
+                            val enabled = if (feature == FeatureRegistry.cloudSyncEntry) {
+                                container.cloudSyncService.canOpenCloudSync()
+                            } else state.enabled
+                            FeatureDebugCard(state, enabled = enabled) { override ->
                                 scope.launch {
                                     overrideWrites.withLock { repository.setDebugOverride(feature, override) }
                                 }

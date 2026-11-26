@@ -714,13 +714,15 @@ class SyncV2P6ProductTest {
     private inner class ServiceEntry(
         val h: Host,
         roundTimeoutMillis: Long? = null,
-        sessionPreferences: SharedPreferences = MemoryPreferences()
+        sessionPreferences: SharedPreferences = MemoryPreferences(),
+        statePreferences: SharedPreferences = MemoryPreferences(),
+        cloudEntryEnabled: () -> Boolean = { true }
     ):AutoCloseable {
         private val c=h.context
         private val epoch="11111111-1111-4111-8111-111111111111"
         private val generation="22222222-2222-4222-8222-222222222222"
         private val scope=kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob()+kotlinx.coroutines.Dispatchers.Default)
-        val preferences=com.lightningstudio.watchrss.phone.testing.MemoryPreferences()
+        val preferences=statePreferences
         val settings=com.lightningstudio.watchrss.phone.cloud.PhoneCloudStateStore(preferences)
         var announced=true;var failAuthentication=false;var unsupported=false;var legacyCalls=0;var bootstraps=0
         var bootstrapTimesOut = false
@@ -735,6 +737,7 @@ class SyncV2P6ProductTest {
                 .put("attestation", CloudProtocolV2.attestation(h.server.wrap, owner, epoch, h.id, publicKey)))
         }
         var memberReadable = true
+        var hasCloudCommitments = true
         var onBootstrapRequest: (() -> Unit)? = null
         var onRevokeRequest: (() -> Unit)? = null
         private val nextOwner = "34343434-3434-3434-3434-343434343434"
@@ -769,7 +772,9 @@ class SyncV2P6ProductTest {
             val status=if(bootstrap){bootstraps++;if(failAuthentication)401 else if(unsupported)426 else 200}else{legacyCalls++;426}
             val body=if(status==200)JSONObject().put("libraryEpoch",epoch).put("contentGeneration",generation).put("contentEmpty",false)
                 .put("member",memberJson())
-                .put("keyVersionFloor",0).put("keyCommitments",JSONArray().put(JSONObject().put("keyVersion",1).put("commitment",com.lightningstudio.watchrss.phone.cloud.CloudProtocolV2.commitment(h.server.wrap,owner,epoch,1))))
+                .put("keyVersionFloor",0).put("keyCommitments",JSONArray().apply {
+                    if (hasCloudCommitments) put(JSONObject().put("keyVersion",1).put("commitment",CloudProtocolV2.commitment(h.server.wrap,owner,epoch,1)))
+                })
                 .put("keyEnvelopes",JSONArray()).put("devices",approvedDevices(owner)).also{if(announced)it.put("syncV2",h.server.announcement)}
                 else JSONObject().put("error",if(unsupported)"client_upgrade_required"else if(failAuthentication)"invalid_token"else JSONObject().put("code","upgrade_required").put("details",JSONObject().put("requiredFeatures",JSONArray().put("sync-objects.v2"))))
                     status to body
@@ -787,17 +792,17 @@ class SyncV2P6ProductTest {
             val caps=android.net.NetworkCapabilities();org.robolectric.Shadows.shadowOf(caps).addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET);shadow.setNetworkCapabilities(manager.activeNetwork,caps)
             service=com.lightningstudio.watchrss.phone.cloud.PhoneCloudSyncService(c,account,com.lightningstudio.watchrss.phone.data.backup.WatchRssBackupService(c,h.room,repo,reader,h.id),repo,
                 com.lightningstudio.watchrss.phone.data.note.NoteRepository(h.room.noteDao(),h.id),h.id,client,keyManager=h.manager,settings=settings,syncV2Database={h.room},
-                syncV2RoundTimeoutMillis = roundTimeoutMillis ?: 330_000L)
+                syncV2RoundTimeoutMillis = roundTimeoutMillis ?: 330_000L, cloudEntryEnabled = cloudEntryEnabled)
             // Replace only the local build gate with the existing real enabled product fixture.
             service.javaClass.getDeclaredField("syncV2Product\$delegate").apply{isAccessible=true}.set(service,lazy{h.product})
         }
         fun sync(manual:Boolean)=runBlocking{service.syncNow(manual)}
         fun prepareRevoke() = client.useEpoch(session, epoch)
-        suspend fun switchAccount(): String {
+        suspend fun switchAccount(withCloudKey: Boolean = true): String {
             val next = session.copy(userId = nextOwner, accessToken = "other-session")
             account.saveCompletedLogin(LoginProgress("test-login", 1, listOf("otp"), true, next))
             assertEquals(next.userId, account.session.value?.userId)
-            h.manager.saveAccountKey(next.userId, 1, h.server.wrap, true)
+            if (withCloudKey) h.manager.saveAccountKey(next.userId, 1, h.server.wrap, true)
             h.account = h.account!!.copy(userId = next.userId)
             return next.userId
         }
@@ -813,6 +818,103 @@ class SyncV2P6ProductTest {
             }
         override fun close(){scope.coroutineContext[kotlinx.coroutines.Job]?.cancel();service.javaClass.getDeclaredField("recordStore").apply{isAccessible=true}.get(service).let{(it as com.lightningstudio.watchrss.phone.cloud.PhoneCloudRecordStore).close()}}
     }
+    @Test fun cloudEntryAtZeroPercentSurvivesLocalKeyRemovalAndServiceRecreation() = runBlocking {
+        Server().use { server -> Host(server, "entry-recovery").use { host ->
+            val state = MemoryPreferences()
+            val session = MemoryPreferences()
+            ServiceEntry(host, sessionPreferences = session, statePreferences = state, cloudEntryEnabled = { false }).use { entry ->
+                assertTrue(entry.service.canOpenCloudSync())
+                entry.service.discardSessionCloudState(entry.session)
+                assertFalse(entry.service.hasLocalAccountKey())
+                assertTrue("Keep recovery after clearing the old registration", entry.service.canOpenCloudSync())
+            }
+            ServiceEntry(host, sessionPreferences = session, statePreferences = state, cloudEntryEnabled = { false }).use { entry ->
+                assertFalse(entry.service.hasLocalAccountKey())
+                assertTrue("Keep recovery after restart", entry.service.canOpenCloudSync())
+                assertFalse(entry.service.acceptDeviceApproval(entry.session.userId))
+            }
+            ServiceEntry(host, cloudEntryEnabled = { false }).use { entry ->
+                assertFalse(entry.service.canOpenCloudSync())
+                val error = runCatching { entry.service.prepareFirstDevice() }.exceptionOrNull()
+                assertEquals("此手机暂未开放云同步入口", error?.message)
+                assertEquals(0, entry.bootstraps)
+            }
+        } }
+    }
+
+    @Test fun cloudEntryDiscoversPreviouslyEnabledAccountAtZeroWithoutRegisteringThisPhone() = runBlocking {
+        Server().use { server -> Host(server, "entry-discovery").use { host ->
+            host.manager.clearAccountKeys(user)
+            ServiceEntry(host, cloudEntryEnabled = { false }).use { entry ->
+                assertFalse(entry.service.canOpenCloudSync())
+                entry.hasCloudCommitments = false
+                entry.service.refreshCloudEntryEligibility(user)
+                assertFalse(entry.service.canOpenCloudSync())
+                entry.hasCloudCommitments = true
+                entry.service.refreshCloudEntryEligibility(user)
+                assertTrue(entry.service.canOpenCloudSync())
+                assertFalse(entry.service.hasLocalAccountKey())
+                assertNull(entry.service.pairingEpoch())
+                assertEquals(2, entry.bootstraps)
+                assertEquals(0, entry.legacyCalls)
+                assertFalse(entry.service.acceptDeviceApproval(user))
+                assertFalse(entry.service.hasLocalAccountKey())
+
+                val otherUser = entry.switchAccount(withCloudKey = false)
+                assertFalse(entry.service.canOpenCloudSync())
+                entry.service.refreshCloudEntryEligibility(user)
+                assertFalse(entry.service.canOpenCloudSync())
+                entry.hasCloudCommitments = false
+                entry.service.refreshCloudEntryEligibility(otherUser)
+                assertFalse(entry.service.canOpenCloudSync())
+            }
+        } }
+    }
+
+    @Test fun headPollSkipsRepeatedFullRoundsUntilTagChangesOrChoiceIsApplied() = runBlocking {
+        Server().use { server ->
+            Host(server, "choice-writer").use { host -> ServiceEntry(host).use { entry ->
+                host.note("cloud copy")
+                assertTrue(entry.service.syncNow().completed)
+            } }
+            Host(server, "choice-reader").use { host -> ServiceEntry(host).use { entry ->
+                entry.approvedForHead = true
+                host.note("local copy")
+                assertEquals("pending_choice", entry.service.restoreCurrentLibrary().outcome?.errorCode)
+                val poller = PhoneCloudHeadPoller({ 0 }, { 0 })
+                fun serve(tag: String) {
+                    // Return 200 even with the same ETag, as a server may revalidate unconditionally.
+                    server.headResponse = {
+                        server.response(JSONObject().put("etag", tag).put("pollAfterMs", 20_000))
+                            .setHeader("ETag", "\"$tag\"")
+                    }
+                }
+                serve("first")
+                assertTrue(entry.service.pollCloudHead(poller) { true })
+                val waiting = entry.bootstraps
+                repeat(3) { assertTrue(entry.service.pollCloudHead(poller) { true }) }
+                assertEquals(waiting, entry.bootstraps)
+                assertEquals("\"first\"", server.headRequests.last().getHeader("If-None-Match"))
+                server.headResponse = { MockResponse().setResponseCode(304) }
+                assertTrue(entry.service.pollCloudHead(poller) { true })
+                assertEquals(waiting, entry.bootstraps)
+                serve("changed")
+                assertTrue(entry.service.pollCloudHead(poller) { true })
+                assertEquals(waiting + 1, entry.bootstraps)
+                assertTrue(entry.service.pollCloudHead(poller) { true })
+                assertEquals(waiting + 1, entry.bootstraps)
+
+                val port = requireNotNull(host.product.uiPort.value)
+                port.chooseCloud(port.openChoice())
+                assertNull(port.state.value.choice)
+                assertTrue(entry.service.pollCloudHead(poller) { true })
+                assertEquals(waiting + 2, entry.bootstraps)
+                assertNull(server.headRequests.last().getHeader("If-None-Match"))
+                assertEquals(CloudSyncPhase.COMPLETE, entry.service.state.value.phase)
+            } }
+        }
+    }
+
     @Test fun headPoll200RunsAFullRoundAnd304OnlyReadsHead() = runBlocking {
         Server().use { server -> Host(server, "head").use { host -> ServiceEntry(host).use { entry ->
             entry.approvedForHead = true
@@ -907,6 +1009,19 @@ class SyncV2P6ProductTest {
             server.headResponse = { MockResponse().setResponseCode(429).setBody("""{"pollAfterMs":29000}""") }
             assertEquals(CloudHeadReply.RateLimited(29_000), host.product.probeHead(owner, null))
             server.headResponse = {
+                MockResponse().setResponseCode(429).setHeader("Retry-After", "720")
+                    .setBody("""{"pollAfterMs":600000}""")
+            }
+            assertEquals(CloudHeadReply.RateLimited(720_000), host.product.probeHead(owner, null))
+            server.headResponse = {
+                val date = java.util.Date(System.currentTimeMillis() + 600_000)
+                val format = java.text.SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss 'GMT'", java.util.Locale.US)
+                format.timeZone = java.util.TimeZone.getTimeZone("GMT")
+                MockResponse().setResponseCode(429).setHeader("Retry-After", format.format(date))
+            }
+            val dateReply = host.product.probeHead(owner, null) as CloudHeadReply.RateLimited
+            assertTrue(requireNotNull(dateReply.retryAfterMs) in 590_000..600_000)
+            server.headResponse = {
                 MockResponse().setResponseCode(403).setBody("""{"error":{"code":"head_poll_disabled"}}""")
             }
             assertEquals(CloudHeadReply.Disabled, host.product.probeHead(owner, null))
@@ -914,7 +1029,7 @@ class SyncV2P6ProductTest {
                 MockResponse().setResponseCode(503).setBody("""{"error":{"code":"temporarily_unavailable"}}""")
             }
             assertTrue(runCatching { host.product.probeHead(owner, null) }.exceptionOrNull() is java.io.IOException)
-            assertEquals(4, server.headRequests.size)
+            assertEquals(6, server.headRequests.size)
         } }
     }
 

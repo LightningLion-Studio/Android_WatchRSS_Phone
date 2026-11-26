@@ -10,6 +10,7 @@ import com.lightningstudio.watchrss.phone.network.CloudHttpDeadline
 import kotlinx.coroutines.asContextElement
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.async
@@ -163,6 +164,8 @@ class PhoneCloudSyncService(
         }
     }
 
+    private val cloudActivationChanges = MutableStateFlow(0L)
+    internal val cloudEntryChanges = combine(keyManager.changes, cloudActivationChanges) { key, activation -> key + activation }
     private val pairingEpochState = MutableStateFlow<String?>(null)
     val pairingChanges: kotlinx.coroutines.flow.Flow<Unit> = merge(keyManager.changes.map { Unit }, pairingEpochState.map { Unit })
     fun pairingEpoch(): String? = accountRepository.session.value?.let { client.knownEpoch(it) }
@@ -489,6 +492,8 @@ class PhoneCloudSyncService(
     }
     private fun clearCloudScope(session: PhoneAccountSession, reason: String = "account_release") {
         traceSync("cloud-scope-clear:$reason")
+        // Migrate existing installations before removing the only local evidence.
+        if (keyManager.hasAccountKey(session.userId)) rememberCloudActivation(session)
         if (reason == "account_release") synchronized(syncStateLock) {
             accountGeneration++
             _state.value = PhoneCloudSyncState()
@@ -540,6 +545,7 @@ class PhoneCloudSyncService(
         if (bootstrap.syncV2ResetScope != null && usesSyncV2) observeResetBootstrap(session, bootstrap)
         if (bootstrap.syncV2ResetScope == null && settings.resetReady(client.scopeId(session)) != null &&
             settings.libraryEpoch != null && settings.libraryEpoch != bootstrap.libraryEpoch) throw CloudTrustException()
+        if (bootstrap.hasCloudActivationHistory()) rememberCloudActivation(session)
         val changed = settings.observeEpoch(bootstrap.libraryEpoch) { invalidateEpoch(session,"observed_epoch_change") }
         client.useEpoch(session, bootstrap.libraryEpoch)
         pairingEpochState.value = bootstrap.libraryEpoch
@@ -800,13 +806,30 @@ class PhoneCloudSyncService(
         // the epoch and commitments before using any key.
         accountRepository.session.value?.let(::hasTrustedCloudKey) == true
 
-    internal val localKeyChanges get() = keyManager.changes
-
-    internal fun canOpenCloudSync(): Boolean = accountRepository.session.value?.let {
-        // A reset invalidates the old key's use, while the existing account still needs its recovery entry.
-        cloudResetPaused(it) || keyManager.hasAccountKey(it.userId) ||
-            (usesSyncV2 && pendingCloudReset(it.userId) != null)
+    internal fun canOpenCloudSync(): Boolean = accountRepository.session.value?.let { session ->
+        settings.wasCloudSyncEnabled(client.scopeId(session)) || cloudResetPaused(session) ||
+            keyManager.hasAccountKey(session.userId) || (usesSyncV2 && pendingCloudReset(session.userId) != null)
     } == true || cloudEntryEnabled()
+
+    private fun CloudBootstrap.hasCloudActivationHistory(): Boolean = libraryEpoch.isNotBlank() &&
+        (keyCommitments.isNotEmpty() || keyEnvelopes.isNotEmpty() || legacyKeyVersions.isNotEmpty() || keyVersionFloor > 0)
+
+    // Call with the session lock held. The marker grants UI access only.
+    private fun rememberCloudActivation(session: PhoneAccountSession) {
+        if (settings.rememberCloudSyncEnabled(client.scopeId(session))) cloudActivationChanges.value++
+    }
+
+    internal suspend fun refreshCloudEntryEligibility(expectedUserId: String) =
+        withContext(operationGeneration.asContextElement(accountGeneration)) {
+            val session = accountRepository.session.value ?: return@withContext
+            if (session.userId != expectedUserId || !accountRepository.hasUsableSession || canOpenCloudSync()) return@withContext
+            val bootstrap = client.bootstrap(session, observeResult = false)
+            currentCoroutineContext().ensureActive()
+            synchronized(syncStateLock) {
+                checkApprovalOwner(session)
+                if (bootstrap.hasCloudActivationHistory()) rememberCloudActivation(session)
+            }
+        }
 
     private fun requireCloudSyncEntry() {
         check(canOpenCloudSync()) { "此手机暂未开放云同步入口" }
@@ -1631,12 +1654,17 @@ class PhoneCloudSyncService(
                         }
                     },
                     sync = {
-                        if (!eligible()) false else try {
+                        if (!eligible()) CloudHeadSyncOutcome.RETRY else try {
                             traceSync("sync-request")
-                            syncUnderLock(manual = false, restoreCurrent = false, expectedUserId = session.userId).completed
+                            val result = syncUnderLock(manual = false, restoreCurrent = false, expectedUserId = session.userId)
+                            when {
+                                result.completed -> CloudHeadSyncOutcome.COMPLETE
+                                result.outcome?.errorCode == "pending_choice" -> CloudHeadSyncOutcome.AWAITING_CHOICE
+                                else -> CloudHeadSyncOutcome.RETRY
+                            }
                         } catch (_: Exception) {
                             currentCoroutineContext().ensureActive()
-                            false
+                            CloudHeadSyncOutcome.RETRY
                         }
                     },
                     pendingLocal = {
@@ -1645,7 +1673,8 @@ class PhoneCloudSyncService(
                         } catch (_: IllegalStateException) {
                             false
                         }
-                    }
+                    },
+                    awaitingChoice = { syncV2Product.uiPort.value?.state?.value?.choice != null }
                 )
             }
         }

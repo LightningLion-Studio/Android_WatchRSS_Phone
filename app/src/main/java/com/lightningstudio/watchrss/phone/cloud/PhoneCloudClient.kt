@@ -115,7 +115,8 @@ class PhoneCloudClient(
             response.jsonBody().memberState()
         }
 
-    suspend fun bootstrap(session: PhoneAccountSession): CloudBootstrap = readBootstrap(session, true)
+    suspend fun bootstrap(session: PhoneAccountSession, observeResult: Boolean = true): CloudBootstrap =
+        readBootstrap(session, observeResult)
 
     internal suspend fun readBootstrap(session: PhoneAccountSession, observe: Boolean): CloudBootstrap {
         val (json, requestedGeneration) = post(session, "/functions/v1/cloud/bootstrap", JSONObject(), expectedEpoch = null).use { it.jsonBody() to it.request.tag(CloudContentRequestGeneration::class.java) }

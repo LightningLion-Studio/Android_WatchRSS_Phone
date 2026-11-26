@@ -34,9 +34,13 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -221,6 +225,23 @@ class PhoneCompanionApplication : Application(), ImageLoaderFactory {
         if (!consentServicesStarted.compareAndSet(false, true)) return
         container.oppoPushCoordinator.init()
         startForegroundCloudPolling()
+        appScope.launch {
+            accountInitialization.await()
+            val access = container.appAccessCoordinator
+            val account = container.accountRepository
+            combine(hasStartedActivity, access.state, account.session, account.reauthenticationOwner) { started, _, session, _ ->
+                session?.userId?.takeIf { started && access.isAuthorized && account.hasUsableSession }
+            }.distinctUntilChanged().collectLatest { owner ->
+                if (owner == null || !PhonePrivacyConsentStore(this@PhoneCompanionApplication).hasRequiredConsent()) {
+                    return@collectLatest
+                }
+                try {
+                    container.cloudSyncService.refreshCloudEntryEligibility(owner)
+                } catch (_: Exception) {
+                    currentCoroutineContext().ensureActive()
+                }
+            }
+        }
         val lifecycle = ProcessLifecycleOwner.get().lifecycle
         ProcessLifecycleOwner.get().lifecycleScope.launch {
             lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {

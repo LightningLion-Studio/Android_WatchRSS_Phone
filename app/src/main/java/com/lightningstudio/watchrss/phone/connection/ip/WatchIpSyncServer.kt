@@ -5,6 +5,8 @@ import fi.iki.elonen.NanoHTTPD
 import fi.iki.elonen.NanoWSD
 import org.json.JSONObject
 import java.io.IOException
+import java.io.InputStream
+import java.net.Socket
 import java.security.SecureRandom
 import java.util.Base64
 import java.util.UUID
@@ -13,7 +15,29 @@ internal class WatchIpSyncServer(
     private val descriptorProvider: IpEndpointProvider,
     port: Int
 ) : NanoWSD(port), AutoCloseable {
-    override fun openWebSocket(handshake: IHTTPSession): WebSocket = SyncWebSocket(handshake)
+    private data class Connection(val socket: Socket, val activity: IpReadActivity)
+    private val socketActivity = ThreadLocal<Connection>()
+
+    override fun createClientHandler(socket: Socket, inputStream: InputStream): ClientHandler {
+        val activity = IpReadActivity()
+        val output = activity.output(socket.getOutputStream())
+        // NanoHTTPD obtains its output from the accepted Socket. Keep its parser and
+        // framing, but observe writes and retain the real socket for forced abort.
+        val observed = object : Socket() {
+            override fun getOutputStream() = output
+            override fun getInetAddress() = socket.inetAddress
+            override fun isClosed() = socket.isClosed
+            override fun close() = socket.close()
+        }
+        return object : ClientHandler(activity.input(inputStream), observed) {
+            override fun run() {
+                socketActivity.set(Connection(socket, activity))
+                try { super.run() } finally { socketActivity.remove() }
+            }
+        }
+    }
+
+    override fun openWebSocket(handshake: IHTTPSession): WebSocket = SyncWebSocket(handshake, socketActivity.get())
 
     override fun serveHttp(session: IHTTPSession): Response {
         return when (session.uri) {
@@ -31,7 +55,7 @@ internal class WatchIpSyncServer(
         PhoneIpSyncSessionRegistry.activeSessions().forEach(PhoneIpSyncSession::close)
     }
 
-    private inner class SyncWebSocket(handshake: IHTTPSession) : WebSocket(handshake) {
+    private inner class SyncWebSocket(handshake: IHTTPSession, private val connection: Connection?) : WebSocket(handshake) {
         private var authenticatedSession: PhoneIpSyncSession? = null
 
         override fun onOpen() {
@@ -115,15 +139,12 @@ internal class WatchIpSyncServer(
                 remoteAddress = handshakeRequest.remoteIpAddress.orEmpty(),
                 sendBinary = { bytes -> send(bytes) },
                 trace = {event,fields->Log.i(TAG,"IP pipe $event "+fields.entries.joinToString(" "){"${it.key}=${it.value}"})},
-                closeSocket = {
-                    // NanoWSD.close(OPEN) only sends a close frame and waits for the peer.
-                    // A stalled peer must not retain its native stream/active route until TCP timeout.
-                    runCatching { handshakeRequest.inputStream.close() }
-                    runCatching {
-                        close(WebSocketFrame.CloseCode.NormalClosure, "session ended", false)
-                    }
-                }
+                closeSocket = { connection?.socket?.close() }
             )
+            session.wireConnectionId = connection?.activity?.connectionId ?: 0L
+            session.wireReadActivityNanos = { connection?.activity?.lastNanos ?: 0L }
+            session.wireWriteActivityNanos = { connection?.activity?.lastWriteNanos ?: 0L }
+            session.enableWireWriteTracking = { connection?.activity?.trackWrites = true }
             authenticatedSession = session
             send(ack.toJson().toString())
             PhoneIpSyncSessionRegistry.register(session)

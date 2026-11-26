@@ -21,11 +21,12 @@ class IpReadDeadlineTest {
         }
     }
     @Test fun positiveByteProgressKeepsALongReadAliveWithoutRaisingTheTotalBudget() {
-        val s=session(400);val task=FutureTask {ByteArray(5).also{DataInputStream(s.inputStream).readFully(it)}}
+        val expected = ByteArray(10) { it.toByte() }
+        val s=session(1000);val task=FutureTask {ByteArray(expected.size).also{DataInputStream(s.inputStream).readFully(it)}}
         val thread=Thread(task).apply{start()}
         try {
-            repeat(5){Thread.sleep(150);s.acceptBinary(byteArrayOf(it.toByte()))}
-            assertArrayEquals(byteArrayOf(0,1,2,3,4),task.get(2,TimeUnit.SECONDS));assertFalse(s.isClosed)
+            expected.forEach { Thread.sleep(150); s.acceptBinary(byteArrayOf(it)) }
+            assertArrayEquals(expected,task.get(2,TimeUnit.SECONDS));assertFalse(s.isClosed)
         }finally{s.close();thread.join(2000)}
     }
     @Test fun manifestFirstByteBudgetDoesNotExtendAStalledBody() {
@@ -37,4 +38,17 @@ class IpReadDeadlineTest {
             assertTrue(task.get(2,TimeUnit.SECONDS) is SocketTimeoutException);assertTrue(s.isClosed)
         }finally{s.close();thread.join(2000)}
     }
+    @Test fun rawSocketBytesExtendBufferedPipeReadUntilActualSilence() {
+        val s = session(150)
+        val activity = java.util.concurrent.atomic.AtomicLong()
+        s.wireReadActivityNanos = { activity.get() }
+        val task = FutureTask { try { s.inputStream.read(); null } catch (e: Exception) { e } }
+        val reader = Thread(task).apply { start() }
+        try {
+            repeat(8) { activity.set(System.nanoTime()); Thread.sleep(40); assertFalse(s.isClosed) }
+            assertTrue(task.get(2, TimeUnit.SECONDS) is SocketTimeoutException)
+            assertTrue(s.isClosed)
+        } finally { s.close(); reader.join(2000); assertFalse(reader.isAlive) }
+    }
+
 }

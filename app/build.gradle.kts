@@ -1,7 +1,5 @@
-import groovy.json.JsonSlurper
-import java.net.URI
-import java.net.URISyntaxException
 import java.util.Properties
+import watchrss.build.ReleaseConfiguration
 
 plugins {
     alias(libs.plugins.android.application)
@@ -24,96 +22,54 @@ if (localPropertiesFile.exists()) {
     localPropertiesFile.inputStream().use { localProperties.load(it) }
 }
 
-fun productionSetting(name: String): String =
-    localProperties.getProperty(name)?.takeIf { it.isNotBlank() }
-        ?: providers.gradleProperty(name).orNull?.takeIf { it.isNotBlank() }
-        ?: providers.environmentVariable(name).orNull?.takeIf { it.isNotBlank() }
-        ?: when (name) {
-            "WATCHRSS_APP_ACCESS_PUBLIC_KEY" -> "config/app_access_public_key.pem"
+fun productionSetting(name: String): String = ReleaseConfiguration.firstNonBlank(
+    { localProperties.getProperty(name) },
+    { providers.gradleProperty(name).orNull },
+    { providers.environmentVariable(name).orNull },
+    {
+        when (name) {
+            ReleaseConfiguration.APP_ACCESS_KEY -> "config/app_access_public_key.pem"
             "WATCHRSS_TEST_APP_ACCESS_PUBLIC_KEY" -> "config/app_access_test_public_key.pem"
             else -> null
-        }?.let { relativePath ->
-            rootProject.file(relativePath)
-                .takeIf { it.isFile }
-                ?.readText()
-                ?.trim()
-        }
-        ?: ""
-
-fun String.asBuildConfigString(): String =
-    "\"${replace("\\", "\\\\")
-        .replace("\"", "\\\"")
-        .replace("\r", "\\r")
-        .replace("\n", "\\n")}\""
-
-val productionBackendBaseUrl = productionSetting("WATCHRSS_BACKEND_BASE_URL")
-val productionSupabaseAnonKey = productionSetting("WATCHRSS_SUPABASE_ANON_KEY")
-val invalidProductionSettings = buildList {
-    val backendUri = try {
-        URI(productionBackendBaseUrl)
-    } catch (_: URISyntaxException) {
-        null
+        }?.let { path -> rootProject.file(path).takeIf { it.isFile }?.readText() }
     }
-    if (backendUri == null || !backendUri.scheme.equals("https", ignoreCase = true) ||
-        backendUri.host.isNullOrBlank() || backendUri.port > 65535
-    ) {
-        add("WATCHRSS_BACKEND_BASE_URL")
-    }
-    if (productionSupabaseAnonKey.isBlank()) {
-        add("WATCHRSS_SUPABASE_ANON_KEY")
-    }
-}
+)
 
-fun invalidAiDisclosureFields(snapshotFile: File): List<String> {
-    val snapshot = runCatching { JsonSlurper().parse(snapshotFile) as? Map<*, *> }.getOrNull()
-        ?: return listOf(snapshotFile.name)
-    val features = snapshot["features"] as? Map<*, *> ?: return listOf("features")
-    val requiredTextFields = listOf("displayText", "modelName")
-    val nullableTextFields = listOf("providerName", "filingNumber", "launchNumber")
-    fun isFilled(value: Any?): Boolean =
-        value is String && value.isNotBlank() && "__FILL_BEFORE_RELEASE__" !in value
-    return buildList {
-        for (field in listOf("revision", "updatedAt")) {
-            val value = snapshot[field]
-            if (value !is Int && value !is Long) add(field)
-        }
-        for (feature in listOf("ai_support", "article_summary")) {
-            val path = "features.$feature"
-            val entries = features[feature] as? List<*>
-            if (entries.isNullOrEmpty()) {
-                add(path)
-                continue
-            }
-            entries.forEachIndexed { index, raw ->
-                val entry = raw as? Map<*, *>
-                if (entry == null) {
-                    add("$path[$index]")
-                } else {
-                    for (field in requiredTextFields + nullableTextFields) {
-                        val value = entry[field]
-                        if ((field in requiredTextFields || value != null) && !isFilled(value)) {
-                            add("$path[$index].$field")
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-val bundledAiDisclosure = layout.projectDirectory.file("src/main/assets/ai-disclosure-default.json")
+val productionBackendUrl = productionSetting(ReleaseConfiguration.BACKEND_URL)
+val productionAnonKey = productionSetting(ReleaseConfiguration.ANON_KEY)
+val productionAppAccessKey = productionSetting(ReleaseConfiguration.APP_ACCESS_KEY)
+val invalidReleaseFields = ReleaseConfiguration.invalidFields(
+    productionBackendUrl, productionAnonKey, productionAppAccessKey
+)
+val bundledAiDisclosure = layout.projectDirectory.file(
+    "src/main/assets/${ReleaseConfiguration.AI_DISCLOSURE_ASSET}"
+)
 val validateReleaseProductionSettings by tasks.registering {
     doLast {
-        val invalidFields = invalidProductionSettings + invalidAiDisclosureFields(bundledAiDisclosure.asFile)
+        val invalidFields = invalidReleaseFields + ReleaseConfiguration.invalidAiDisclosureFields(
+            runCatching { bundledAiDisclosure.asFile.readText() }.getOrNull()
+        )
         if (invalidFields.isNotEmpty()) {
             throw GradleException(invalidFields.joinToString(", "))
         }
     }
 }
 
-tasks.matching { it.name == "preReleaseBuild" }.configureEach {
+val verifyReleaseConfiguration by tasks.registering {
     dependsOn(validateReleaseProductionSettings)
 }
+
+androidComponents.onVariants(androidComponents.selector().withBuildType("release")) { variant ->
+    variant.lifecycleTasks.registerPreBuild(verifyReleaseConfiguration)
+    tasks.matching { it.name == variant.computeTaskName("generate", "BuildConfig") }
+        .configureEach { dependsOn(verifyReleaseConfiguration) }
+}
+
+fun String.asBuildConfigString(): String =
+    "\"${replace("\\", "\\\\")
+        .replace("\"", "\\\"")
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")}\""
 
 android {
     testOptions { unitTests.isIncludeAndroidResources = true }
@@ -148,18 +104,18 @@ android {
         buildConfigField(
             "String",
             "WATCHRSS_PRODUCTION_BACKEND_BASE_URL",
-            productionBackendBaseUrl.asBuildConfigString()
+            productionBackendUrl.asBuildConfigString()
         )
         buildConfigField(
             "String",
             "WATCHRSS_PRODUCTION_SUPABASE_ANON_KEY",
-            productionSupabaseAnonKey.asBuildConfigString()
+            productionAnonKey.asBuildConfigString()
         )
         buildConfigField("String", "WATCHRSS_TEST_SUPABASE_ANON_KEY", "\"\"")
         buildConfigField(
             "String",
             "WATCHRSS_APP_ACCESS_PUBLIC_KEY",
-            productionSetting("WATCHRSS_APP_ACCESS_PUBLIC_KEY").asBuildConfigString()
+            productionAppAccessKey.asBuildConfigString()
         )
         buildConfigField("String", "WATCHRSS_TEST_APP_ACCESS_PUBLIC_KEY", "\"\"")
         buildConfigField(

@@ -420,6 +420,72 @@ class OfflineBluetoothReviewTest {
         assertTrue(repo.offlineAuthorizationBlocked("owner"));noDataOrReconnect()
     }
 
+    @Test
+    fun newerRefusalDuringStartupMustLeaveARetryAction() = runBlocking<Unit> {
+        seedCache()
+        onlineReplies()
+        val replies = httpReply
+        httpReply = { request ->
+            replies(request).also {
+                if (request.endsWith("app-access/refresh")) {
+                    repo.recordAuthenticationResponse("owner", 401, "{}")
+                }
+            }
+        }
+        coordinator.reconcile()
+        assertTrue(repo.hasUsableSession)
+        assertTrue(repo.offlineAuthorizationBlocked("owner"))
+        assertFalse(coordinator.isAuthorized)
+        assertEquals(
+            AppAccessState.ValidationError("需要联网完成账号验证"),
+            coordinator.state.value
+        )
+        onlineReplies()
+        val recovery = httpReply
+        httpReply = { path ->
+            val (status, body) = recovery(path)
+            status to if (path.endsWith("app-access/refresh")) {
+                JSONObject(body).put("deviceAccessToken", "review-recovered").toString()
+            } else body
+        }
+        coordinator.reconcile()
+        assertFalse(repo.offlineAuthorizationBlocked("owner"))
+        assertTrue(coordinator.isAuthorized)
+        assertTrue(coordinator.state.value is AppAccessState.Authorized)
+    }
+
+    @Test fun headRefreshTransportFailurePreservesAccessAndExplicitRefusalBlocksIt() = runBlocking<Unit> {
+        seedCache()
+        coordinator.reconcile()
+        assertTrue(coordinator.isAuthorized)
+        val client = com.lightningstudio.watchrss.phone.cloud.PhoneCloudClient(
+            AccountEnvironment(backendBaseUrl = origin, supabaseAnonKey = "synthetic"),
+            deviceAccessToken = { coordinator.deviceAccessToken },
+            refreshDeviceSession = coordinator::refreshRejectedDeviceSession,
+            deviceSessionRequest = { coordinator }
+        )
+        suspend fun rejectedHead() = client.withAccountHeadSession("owner") { token ->
+            throw com.lightningstudio.watchrss.phone.cloud.CloudHeadDeviceSessionRejected(token)
+        }
+        org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(2))
+        val beforeDrop = networkCalls
+        assertTrue(rejectedHead() is com.lightningstudio.watchrss.phone.cloud.CloudHeadReply.RateLimited)
+        assertEquals(beforeDrop + 1, networkCalls)
+        assertTrue(repo.hasUsableSession)
+        assertTrue(coordinator.isAuthorized)
+        assertFalse(repo.offlineAuthorizationBlocked("owner"))
+
+        org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(2))
+        networkFailure = null
+        httpReply = { 401 to "{}" }
+        val failure = runCatching { rejectedHead() }.exceptionOrNull()
+        assertTrue(failure?.cause is PhoneLoginRequired)
+        assertTrue(repo.hasUsableSession)
+        assertTrue(repo.offlineAuthorizationBlocked("owner"))
+        assertFalse(coordinator.isAuthorized)
+        assertEquals(AppAccessState.ValidationError("需要联网完成账号验证"), coordinator.state.value)
+    }
+
     @Test fun explicitRefusalHeadersStillBlockCacheWhenReadingTheBodyTimesOut()=runBlocking<Unit> {
         for(status in listOf(401,403)) {
             seedCache();networkFailure=null;httpReply={status to "{}"}

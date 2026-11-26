@@ -4,6 +4,8 @@ import com.lightningstudio.watchrss.phone.cloud.CLOUD_RESET_HEADER
 import com.lightningstudio.watchrss.phone.cloud.cloudResetSignal
 import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.cloud.CloudHeadReply
+import com.lightningstudio.watchrss.phone.cloud.CloudHeadDeviceSessionRejected
+import com.lightningstudio.watchrss.phone.cloud.isRefreshableCloudDeviceSessionError
 import com.lightningstudio.watchrss.phone.network.CloudCallCancellation
 import com.lightningstudio.watchrss.phone.network.limitToDeadline
 import okhttp3.HttpUrl
@@ -142,9 +144,9 @@ internal class SyncV2CloudClient(
             .header("Accept", if (raw) "application/octet-stream" else "application/json")
             .apply { session.deviceAuthorization?.let { header("x-watchrss-device-authorization", it) } }
 
-    /** This probe does not negotiate a window or report authentication errors to the UI. */
-    suspend fun accountHead(etag: String?): CloudHeadReply = runCancellable {
-        val request = authenticatedRequest(active(), url("account/head"))
+    /** The caller holds the shared device session for this probe. */
+    suspend fun accountHead(etag: String?, deviceAuthorization: String?): CloudHeadReply = runCancellable {
+        val request = authenticatedRequest(active().copy(deviceAuthorization = deviceAuthorization), url("account/head"))
             .apply { etag?.let { header("If-None-Match", it) } }
             .get().build()
         val call = http.newCall(request)
@@ -165,12 +167,17 @@ internal class SyncV2CloudClient(
                         throw IOException("Account head HTTP ${response.code}")
                     }
                     304 -> CloudHeadReply.Unchanged
+                    401 -> throw CloudHeadDeviceSessionRejected(deviceAuthorization?.removePrefix("Bearer "))
                     404, 405 -> CloudHeadReply.Unsupported
                     400, 403 -> {
-                        val code = headResponseJson(response).optJSONObject("error")?.optString("code")
+                        val json = headResponseJson(response)
+                        val code = json.optJSONObject("error")?.optString("code") ?: json.optString("error")
                         when {
                             response.code == 400 && code == "invalid_schema" -> CloudHeadReply.Unsupported
                             response.code == 403 && code == "head_poll_disabled" -> CloudHeadReply.Disabled
+                            response.code == 403 && (code == "scope_mismatch" ||
+                                code == "device_session_invalid" || isRefreshableCloudDeviceSessionError(code)) ->
+                                throw CloudHeadDeviceSessionRejected(deviceAuthorization?.removePrefix("Bearer "))
                             else -> throw IOException("Account head HTTP ${response.code}")
                         }
                     }

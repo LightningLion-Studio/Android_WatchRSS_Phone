@@ -49,6 +49,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import com.lightningstudio.watchrss.phone.tips.TipIds
 import com.lightningstudio.watchrss.phone.tips.ui.tipAnchor
+import com.lightningstudio.watchrss.phone.ui.releaseSmokeError
 
 @Composable
 fun CloudAccountPanel(
@@ -204,7 +205,14 @@ fun CloudAccountPanel(
         if (registrationConflict) {
             OutlinedButton(enabled = !busy, onClick = { showReregisterConfirmation = true }) { Text("重新登记本机") }
         }
-        keyWarning?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
+        keyWarning?.let {
+            Text(
+                it,
+                modifier = Modifier.releaseSmokeError(),
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyMedium
+            )
+        }
         if (member == null) {
             Text(if (memberLoading) "正在读取会员状态…" else "暂时无法读取会员状态。")
             if (usesSyncV2 && syncState.phase == CloudSyncPhase.ERROR && !roundTimedOut) {

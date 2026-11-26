@@ -5,6 +5,7 @@ import androidx.room.Room
 import com.lightningstudio.watchrss.phone.account.B2AccountFence
 import com.lightningstudio.watchrss.phone.connection.bluetooth.B2RoomStore
 import com.lightningstudio.watchrss.phone.connection.bluetooth.B2NoteAssetBusiness
+import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryNoProgressLimit
 import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryTransferRecovery
 import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryTransportFailure
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
@@ -467,7 +468,8 @@ class B2RoomIntegrationTest {
                 throw LibraryTransportFailure(generation, EOFException())
             }
         }.exceptionOrNull()
-        assertEquals("连续 3 次重连后同步未推进", stopped?.message)
+        assertTrue(stopped is LibraryNoProgressLimit)
+        assertEquals("连续 3 次重连后同步均无进展，请稍后重试。", stopped?.message)
         assertEquals(5L, generation)
     }
 

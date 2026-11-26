@@ -23,7 +23,7 @@ class NoteMergeFixTest {
             val a=repo.save("n","T","a")
             var injected=false
             val guarded=object:NoteDao by dao {
-                override suspend fun commitRemoteNote(noteId:String,expected:NoteEntity?,replacement:NoteEntity?,conflict:NoteConflictEntity?,receipt:NoteRemoteReceiptEntity):Boolean {
+                override suspend fun commitRemoteNote(noteId:String,expected:NoteEntity?,replacement:NoteEntity?,conflict:NoteConflictEntity?,receipt:NoteRemoteReceiptEntity):NoteRemoteWrites? {
                     if(!injected){injected=true;repo.save("n","T","unsent local")}
                     return dao.commitRemoteNote(noteId,expected,replacement,conflict,receipt)
                 }

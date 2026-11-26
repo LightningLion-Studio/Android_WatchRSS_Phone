@@ -289,7 +289,7 @@ class PhoneCompanionContainer(context: Context) {
         environment = accountEnvironment,
         deviceAccessToken = { appAccessCoordinator.deviceAccessToken },
         refreshDeviceSession = { token, owner -> appAccessCoordinator.refreshRejectedDeviceSession(token, owner) },
-        deviceSessionRequest = { owner, request -> appAccessCoordinator.withDeviceSession(owner, request) }) }
+        deviceSessionRequest = { appAccessCoordinator }) }
 
     private val rssChannelImporter by lazy {
         com.lightningstudio.watchrss.phone.data.importer.RssChannelImporter(publicImport = { url ->
@@ -365,7 +365,7 @@ class PhoneCompanionContainer(context: Context) {
                 accountEnvironment,
                 deviceAccessToken = { appAccessCoordinator.deviceAccessToken },
                 refreshDeviceSession = { token, owner -> appAccessCoordinator.refreshRejectedDeviceSession(token, owner) },
-                deviceSessionRequest = { owner, request -> appAccessCoordinator.withDeviceSession(owner, request) }
+                deviceSessionRequest = { appAccessCoordinator }
             ),
             keyManager = com.lightningstudio.watchrss.phone.cloud.CloudKeyManager(
                 appContext,
@@ -418,6 +418,11 @@ class PhoneCompanionContainer(context: Context) {
         if (!paused && accountRepository.hasUsableSession) {
             appScope.launch { runCatching { cloudSyncService.syncNow(expectedUserId = expectedUserId) } }
         }
+    }
+
+    internal suspend fun syncAfterNoteSave() {
+        if (fastCloudChangesEnabled() && cloudChangeScheduler.isRunning) return
+        cloudSyncService.syncNow()
     }
 
     fun startCloudChangeScheduler() {

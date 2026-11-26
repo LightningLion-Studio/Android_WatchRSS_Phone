@@ -76,7 +76,12 @@ class PhoneCloudRecordV2Test {
         assertEquals(future.getJSONObject("envelope").toString(),store.quarantine.getValue(future.getString("recordId")).envelope)
     }
     @Test fun poisonAndUnknownVersionAreQuarantinedWhileGoodRowsAdvance()=runBlocking {
-        val store=Store();val bad=row(value("bad"),1);bad.getJSONObject("envelope").put("ciphertextBase64",ByteArray(32).base64())
+        val store = Store()
+        val bad = row(value("bad"), 1)
+        val envelope = bad.getJSONObject("envelope")
+        val ciphertext = envelope.getString("ciphertextBase64").base64Bytes()
+        ciphertext[0] = (ciphertext[0].toInt() xor 0xFF).toByte()
+        envelope.put("ciphertextBase64", ciphertext.base64())
         val missing=row(value("missing"),2,2);val good=row(value("good"),3);var applied=0;var refreshed=0
         val c=client { _,_->200 to page(JSONArray().put(bad).put(missing).put(good),"3") }
         val sync=PhoneCloudRecordSync(c,store,{},{_,_,_->applied++},{1},{_,v->if(v==1)k1.copyOf() else null},{},anchorVersion={1},refreshKeys={refreshed++})

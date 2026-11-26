@@ -99,12 +99,16 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
         }
     }
 
-    internal suspend fun probeHead(owner: List<String>, etag: String?): CloudHeadReply? {
+    internal suspend fun probeHead(
+        owner: List<String>,
+        etag: String?,
+        deviceAuthorization: String? = current()?.deviceAuthorization
+    ): CloudHeadReply? {
         if (!mutex.tryLock()) return null
         return try {
             val live = runtime ?: return null
             if (headOwner(live.account.userId) != owner) return null
-            live.client.accountHead(etag)
+            live.client.accountHead(etag, deviceAuthorization)
         } finally {
             mutex.unlock()
         }
@@ -232,7 +236,8 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             val ring=life.guard {life.own(SyncV2ContentKeys.authenticated(keys,account.userId){verifyKeys(account,it)})}
             val store=SyncV2AccountStore(keys,account.userId,life,account.resetScope)
             val resetScope = account.resetScope?.let(::JSONObject)
-            val db = database().openHelper.writableDatabase
+            val room = database()
+            val db = room.openHelper.writableDatabase
             val resetSources = account.resetScope?.let {
                 val depot = File(context.noBackupFilesDir, "cloud-reset/${account.accountId}")
                 life.own(SyncV2ResetSources.open(db, store, it, context.filesDir, depot))
@@ -320,7 +325,9 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             val content=life.guard {life.own(SyncV2ContentStore(File(context.filesDir,"syncv2/$path"),identity.scopeJson,local.copyOf()))}
             val cloud=SyncV2CloudSync(control,identity,projection,approved,ring::read,{time.now()?:System.currentTimeMillis()})
             val actions=life.guard {life.own(SyncV2AccountActions(control,identity,projection,signer,ring::read,approved,context.filesDir,true,time::now,
-                noteSegmentsRead=BuildConfig.SYNC_OBJECTS_V2_NOTE_SEGMENTS,currentKeyVersion={ring.newestVersion}))}
+                noteSegmentsRead=BuildConfig.SYNC_OBJECTS_V2_NOTE_SEGMENTS,currentKeyVersion={ring.newestVersion},
+                // The projection commits on SupportSQLiteDatabase. Notify Room before sending the ACK.
+                onBusinessApplied = { room.invalidationTracker.refreshVersionsAsync() }))}
             val worker=SyncV2ContentWorker(contentClient,identity,content,signals,enabled=contentEnabled,clock=clock,now={time.now()?:System.currentTimeMillis()},approvedDevice={device->
                 val bindings=projection.state().body.optJSONArray("signingBindings")
                 bindings!=null && (0 until bindings.length()).any {index->
@@ -418,12 +425,14 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             }
             // Reconcile the original signed attempt before any new-account or new-source guard.
             if (!restoreCurrent) cloud.resumePublish()
-            val current = cloud.readCurrent()
-            if (restoreCurrent && current == "empty-account") {
-                throw SyncV2CloudError("current_library_missing")
+            // Refresh verifies the current head and applies it. A second read before refresh
+            // repeats the checkpoint and signing-key requests on every foreground catch-up.
+            actions.refresh(budgetMillis = remaining()) { status ->
+                if (restoreCurrent && status == "empty-account") {
+                    throw SyncV2CloudError("current_library_missing")
+                }
+                if (signingDeviceId() == null) actions.prepareSigning()
             }
-            if(signingDeviceId()==null)actions.prepareSigning()
-            actions.refresh(budgetMillis=remaining())
             val referenceErrors=if(contentEnabled)life.guard{bodies?.refreshReferences()?:emptyList()}else emptyList()
             val progress=projection.runWindow(budgetMillis=remaining())
             if(progress.paused)SyncV2Codec.fail("budget_paused")

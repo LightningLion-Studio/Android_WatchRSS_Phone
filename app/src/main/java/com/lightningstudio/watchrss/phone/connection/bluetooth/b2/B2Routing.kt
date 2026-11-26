@@ -1,5 +1,6 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth.b2
 
+import com.lightningstudio.watchrss.phone.connection.bluetooth.B2BookState
 import org.json.JSONObject
 import org.json.JSONArray
 
@@ -11,7 +12,7 @@ object B2Routing {
     private val bits = setOf("supportsManifestBatches", "supportsReaderPresets", "supportsReaderAssets", "supportsResourceChunkAck", "supportsReaderPresetPreview", "supportsPersistentSession", "supportsTransferByteProgress")
     private val extensions = setOf("supportsAutomaticAccountSync", "supportsDomainFastPathV2", "supportsBookSyncV1", "supportsBookReadingDeltaV1", "supportsNoteManifestV2", "supportsNoteAssetInventory", "supportsRssCanonicalIds", "supportsFullMetadataOnlyArticles", "supportsMetadataOnlyArticles", "supportsTokenUsageCursor", "persistentSessionAccepted")
     private val dynamic = setOf("deviceId", "sentAt", "account", "accountMatchesRequest", "ipUpgradeAccepted", "watchCapabilities")
-    private val special = setOf("libraryPeer", "libraryBinary", "libraryResume", "supportedLibraryResumeVersions", "supportedLibraryBinaryVersions")
+    private val special = setOf(B2BookState.VERSION, "libraryPeer", "libraryBinary", "libraryResume", "supportedLibraryResumeVersions", "supportedLibraryBinaryVersions")
     fun classify(p: JSONObject, ready: Ready, guardedOffered: Boolean = false): Peer = try {
         classifyChecked(p, ready, guardedOffered)
     } catch (e: B2Exception) {

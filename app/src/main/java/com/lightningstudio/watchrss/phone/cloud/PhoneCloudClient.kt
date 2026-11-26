@@ -2,6 +2,9 @@ package com.lightningstudio.watchrss.phone.cloud
 
 import com.lightningstudio.watchrss.phone.account.AccountEnvironment
 import com.lightningstudio.watchrss.phone.account.PhoneAccountSession
+import com.lightningstudio.watchrss.phone.account.PhoneAccountTemporarilyUnavailable
+import com.lightningstudio.watchrss.phone.account.PhoneDeviceVerificationRequired
+import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneLoginRequired
 import com.lightningstudio.watchrss.phone.data.importer.ImportedRssItem
 import com.lightningstudio.watchrss.phone.data.importer.ImportedRssSource
 import com.lightningstudio.watchrss.phone.network.withWatchRssAppVersionHeader
@@ -20,13 +23,18 @@ import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
+/** Holds the current device session while a cloud request uses it. */
+interface CloudDeviceSessionRequest {
+    suspend fun <T> withDeviceSession(expectedUserId: String, request: suspend (String?) -> T): T
+}
+
 class PhoneCloudClient(
     private val environment: AccountEnvironment,
     private val deviceAccessToken: () -> String? = { null },
     private val http: OkHttpClient = defaultHttpClient(),
     private val refreshDeviceSession: suspend (String, String) -> Boolean = { _, _ -> false },
     private val downloadBackoff: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
-    private val deviceSessionRequest: (suspend (String, suspend (String?) -> okhttp3.Response) -> okhttp3.Response)? = null
+    private val deviceSessionRequest: (() -> CloudDeviceSessionRequest)? = null
 ) {
     internal var allowR48Writes:()->Boolean = { CloudFormatR48.writeV1 }
     val backendBaseUrl: String get() = environment.backendBaseUrl.trimEnd('/')
@@ -36,6 +44,37 @@ class PhoneCloudClient(
             requireNotNull(currentDeviceId),epoch,generation,session.accessToken,environment.supabaseAnonKey,
             deviceAccessToken()?.takeIf{it.isNotBlank()}?.let{"Bearer $it"})
     }
+    private suspend fun <T> withDeviceSession(userId: String, request: suspend (String?) -> T): T {
+        val gate = deviceSessionRequest?.invoke()
+        return if (gate != null) gate.withDeviceSession(userId, request) else request(deviceAccessToken())
+    }
+
+    internal suspend fun withAccountHeadSession(
+        userId: String,
+        probe: suspend (String?) -> CloudHeadReply?
+    ): CloudHeadReply? {
+        val rejected = try {
+            return withDeviceSession(userId, probe)
+        } catch (error: CloudHeadDeviceSessionRejected) {
+            error.token ?: throw error
+        }
+        // Release the reader before refreshing. The shared refresh may reuse a concurrent rotation.
+        currentCoroutineContext().ensureActive()
+        try {
+            if (!refreshDeviceSession(rejected, userId)) throw CloudDeviceSessionRefreshException()
+        } catch (error: PhoneAccountTemporarilyUnavailable) {
+            return CloudHeadReply.RateLimited(error.retryAfterMillis)
+        } catch (error: PhoneLoginRequired) {
+            throw IOException(error.message, error)
+        } catch (error: PhoneDeviceVerificationRequired) {
+            throw IOException(error.message, error)
+        }
+        return withDeviceSession(userId) { token ->
+            if (token.isNullOrBlank() || token == rejected) throw CloudDeviceSessionRefreshException()
+            probe(token)
+        }
+    }
+
     private val epochs = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val contentGenerations = java.util.concurrent.ConcurrentHashMap<String, String>()
     @Volatile private var http1Uploads = false
@@ -657,7 +696,7 @@ class PhoneCloudClient(
                 val call = timedCall(buildRequest(token))
                 if (cancellableResponse) call.executeBufferedCloudResponse() else call.execute()
             }
-            return deviceSessionRequest?.invoke(session.userId, send) ?: send(deviceAccessToken())
+            return withDeviceSession(session.userId, send)
         }
         var response = attempt()
         val rejected = response.request.header("x-watchrss-device-authorization")?.removePrefix("Bearer ")
@@ -807,6 +846,9 @@ class PhoneCloudClient(
 
 internal fun isRefreshableCloudDeviceSessionError(code: String): Boolean =
     code == "device_session_revoked" || code == "device_session_expired"
+
+/** The head error does not distinguish device rejection from account rejection. */
+internal class CloudHeadDeviceSessionRejected(val token: String?) : IOException("Account head credentials rejected")
 
 internal class CloudDeviceSessionRefreshException : IOException("设备登录状态暂时无法更新，请重试；仍失败时请在账号页重新验证。本机云密钥已保留")
 

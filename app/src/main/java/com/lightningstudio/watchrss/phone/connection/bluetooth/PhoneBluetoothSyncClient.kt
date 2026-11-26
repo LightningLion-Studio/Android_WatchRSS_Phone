@@ -239,8 +239,13 @@ internal class PhoneSyncSession internal constructor(
         outputStream: OutputStream,
         val owner: String,
         val closeOnLegacyFallback: Boolean,
+        internal val ipSession: PhoneIpSyncSession?,
         private val closeTransport: () -> Unit
     ) : Closeable {
+        constructor(inputStream: InputStream, outputStream: OutputStream, owner: String,
+            closeOnLegacyFallback: Boolean, closeTransport: () -> Unit) :
+            this(inputStream, outputStream, owner, closeOnLegacyFallback, null, closeTransport)
+
         private val rawInput = inputStream
         private val rawOutput = outputStream
         @Volatile var binaryAuthorization: (() -> Unit)? = null
@@ -1828,6 +1833,20 @@ class PhoneBluetoothSyncClient(
         applyResponse: suspend (BluetoothLibrarySyncExchange) -> Unit
     ): BluetoothLibrarySyncExchange {
         val transport = session.transport ?: error("持久同步连接已关闭")
+        val recovery = currentCoroutineContext()[LibrarySyncRecovery]
+        val bodyStats = recovery?.bodyTransferStats?.also { it.beginAttempt() }
+        val ipSession = transport.ipSession
+        val ioGuard = if (recovery != null && (ipSession != null || transport.owner.startsWith("rfcomm"))) {
+            ipSession?.enableWireWriteTracking?.invoke()
+            LibraryIoGuard(transport.generation, enabled = { true }, close = transport::close,
+                remotelyClosed = { ipSession?.isClosed == true },
+                beforeIo = transport::checkBinaryRevocation,
+                wireWriteActivityNanos = ipSession?.wireWriteActivityNanos,
+                wireConnectionId = ipSession?.wireConnectionId ?: 0L)
+        } else null
+        // IP already has a read deadline that follows activity before WebSocket buffering.
+        val input = if (ipSession == null && ioGuard != null) ioGuard.input(transport.inputStream) else transport.inputStream
+        val output = ioGuard?.output(transport.outputStream) ?: transport.outputStream
         val startedAt = SystemClock.elapsedRealtime()
         val tracker = ByteTransferTracker().apply { start() }
         var lastProgressStage: PhoneBluetoothSyncStage? = null
@@ -1849,14 +1868,14 @@ class PhoneBluetoothSyncClient(
         report(PhoneBluetoothSyncStage.CONNECTING, 5, force = true)
         val wireCursorRequest = session.requestForExchange(cursorRequest)
         writeFrameLogged(
-            transport.outputStream,
+            output,
             sessionId,
             "sessionCursorRequest",
             wireCursorRequest,
             tracker
         )
         val cursorResponse = readFrameLogged(
-            transport.inputStream,
+            input,
             sessionId,
             "sessionCursorResponse",
             tracker
@@ -1874,7 +1893,10 @@ class PhoneBluetoothSyncClient(
         }
         val peerDeviceId = cursorResponse.optString("deviceId").trim()
             .ifBlank { session.device.remoteDeviceId.ifBlank { session.device.address } }
+        val checkpoint = currentCoroutineContext()[LibraryArticleCheckpointExchange]
+        val checkpointEnabled = checkpoint != null && cursorResponse.optBoolean(LibrarySyncPayload.ARTICLE_CHECKPOINT_FEATURE)
         val request = buildManifestRequest(peerDeviceId, cursorResponse)
+        if (checkpointEnabled) request.put(LibrarySyncPayload.ARTICLE_CHECKPOINT_FEATURE, true)
         val manifestRequests = if (LibrarySyncPayload.supportsManifestBatches(cursorResponse)) {
             LibrarySyncPayload.buildManifestFrames(request)
         } else {
@@ -1882,7 +1904,7 @@ class PhoneBluetoothSyncClient(
         }
         val manifestResponse = exchangeManifest(manifestRequests, write = { index, frame ->
             writeFrameLogged(
-                transport.outputStream,
+                output,
                 sessionId,
                 batchLabel("sessionManifestRequest", index, manifestRequests.size),
                 frame,
@@ -1899,29 +1921,72 @@ class PhoneBluetoothSyncClient(
         var requestWireBytesSent = 0L
         val requestTotalWireBytes = articleRequestStats.totalWireBytes.coerceAtLeast(1L)
         report(PhoneBluetoothSyncStage.TRANSFERRING, 30)
+        val sentIds = mutableSetOf<String>()
+        val newlySent = linkedMapOf<String, String>()
         articleRequests.forEachIndexed { index, articleRequest ->
-            writeFrameLogged(
-                outputStream = transport.outputStream,
-                sessionId = sessionId,
-                label = batchLabel("sessionArticlesRequest", index, articleRequests.size),
-                payload = articleRequest,
-                byteTracker = tracker,
-                onBytesTransferred = { bytes ->
-                    requestWireBytesSent += bytes
-                    report(
-                        PhoneBluetoothSyncStage.TRANSFERRING,
-                        percentBetweenBytes(30, 58, requestWireBytesSent, requestTotalWireBytes)
-                    )
+            val checkpointBoundary = checkpointEnabled && LibrarySyncPayload.wantsArticleCheckpoint(articleRequests, index)
+            if (checkpointEnabled) articleRequest.put("libraryCheckpoint", checkpointBoundary)
+            val startOfFrame = requestWireBytesSent
+            try {
+                writeFrameLogged(
+                    outputStream = output,
+                    sessionId = sessionId,
+                    label = batchLabel("sessionArticlesRequest", index, articleRequests.size),
+                    payload = articleRequest,
+                    byteTracker = tracker,
+                    onBytesTransferred = { bytes ->
+                        requestWireBytesSent += bytes
+                        report(
+                            PhoneBluetoothSyncStage.TRANSFERRING,
+                            percentBetweenBytes(30, 58, requestWireBytesSent, requestTotalWireBytes)
+                        )
+                    }
+                )
+            } catch (failure: IOException) {
+                bodyStats?.partialWire(requestWireBytesSent - startOfFrame)
+                throw failure
+            }
+            bodyStats?.frame("send", articleRequest)
+            if (checkpointEnabled) {
+                val articles = articleRequest.optJSONArray("articles") ?: JSONArray()
+                for (entry in 0 until articles.length()) {
+                    val article = articles.getJSONObject(entry)
+                    val id = article.getString("articleId")
+                    sentIds += id
+                    newlySent[id] = article.optString("contentHash")
                 }
-            )
+                if (checkpointBoundary) {
+                    LibrarySyncPayload.requireArticleBatchAck(
+                        readFrameLogged(input, sessionId, "libraryBatchAck"),
+                        "phoneToWatch", index, sentIds.size
+                    )
+                    newlySent.forEach { (id, hash) -> recovery?.confirmedProgress("sendArticle", "$id|$hash") }
+                    newlySent.clear()
+                }
+            }
         }
         report(PhoneBluetoothSyncStage.TRANSFERRING, 58)
+        val receivedIds = mutableSetOf<String>()
         val responseRead = readLibraryResponse(
-            transport.inputStream,
+            input,
             sessionId,
             onProgress,
             tracker
-        )
+        ) { frame, index ->
+            bodyStats?.frame("receive", frame)
+            if (checkpoint != null) {
+                checkpoint.receiveFrame(frame, checkpointEnabled)
+                if (checkpointEnabled) {
+                    val articles = frame.optJSONArray("articles") ?: JSONArray()
+                    for (entry in 0 until articles.length()) receivedIds += articles.getJSONObject(entry).getString("articleId")
+                    if (frame.optBoolean("libraryCheckpoint")) {
+                        require(receivedIds.all(checkpoint.isApplied)) { "资料批次正文尚未完整应用" }
+                        writeFrameLogged(output, sessionId, "libraryBatchAck",
+                            LibrarySyncPayload.articleBatchAck("watchToPhone", index, receivedIds.size))
+                    }
+                }
+            }
+        }
         val exchange = BluetoothLibrarySyncExchange(
             deviceName = session.device.name,
             deviceAddress = session.device.address,
@@ -1935,7 +2000,7 @@ class PhoneBluetoothSyncClient(
         report(PhoneBluetoothSyncStage.VERIFYING, 88)
         if (manifestResponse.optBoolean("supportsReceivedAck", false)) {
             writeResponseAck(
-                outputStream = transport.outputStream,
+                outputStream = output,
                 sessionId = sessionId,
                 success = true,
                 applied = false,
@@ -1946,14 +2011,14 @@ class PhoneBluetoothSyncClient(
             applyResponse(exchange)
             transport.legacyResponseAdmission?.invoke()
             writeResponseAck(
-                transport.outputStream,
+                output,
                 sessionId,
                 success = true,
                 applied = true
             )?.let { throw it }
         } catch (throwable: Throwable) {
             writeResponseAck(
-                outputStream = transport.outputStream,
+                outputStream = output,
                 sessionId = sessionId,
                 success = false,
                 applied = false,
@@ -1966,6 +2031,7 @@ class PhoneBluetoothSyncClient(
             sessionId = sessionId,
             fields = frameStatsFields("articlesRequest", articleRequestStats) +
                 frameStatsFields("libraryResponse", responseRead.stats) +
+                bodyStats?.snapshot().orEmpty() +
                 mapOf(
                     "deviceAddress" to session.device.address,
                     "elapsedMs" to elapsedSince(startedAt)
@@ -2415,6 +2481,7 @@ class PhoneBluetoothSyncClient(
                 outputStream = ipSession.outputStream,
                 owner = "ip:${ipSession.routeKind.wireName}",
                 closeOnLegacyFallback = false,
+                ipSession = ipSession,
                 closeTransport = { ipSession.close() }
             ),
             persistentAccepted = false,
@@ -2430,11 +2497,12 @@ class PhoneBluetoothSyncClient(
         }
     }
 
-    private fun readLibraryResponse(
+    private suspend fun readLibraryResponse(
         inputStream: InputStream,
         sessionId: String,
         onProgress: (PhoneBluetoothSyncProgress) -> Unit,
-        byteTracker: ByteTransferTracker
+        byteTracker: ByteTransferTracker,
+        onFrame: suspend (JSONObject, Int) -> Unit = { _, _ -> }
     ): LibraryResponseRead {
         var lastPercent = -1
         fun report(percent: Int) {
@@ -2470,6 +2538,7 @@ class PhoneBluetoothSyncClient(
             expectedIndex = 0,
             expectedBatchCount = null
         )
+        onFrame(first, 0)
         val accumulator = CombinedLibraryResponse(first)
         var stats = frameStats(first)
         var completed = 1
@@ -2503,6 +2572,7 @@ class PhoneBluetoothSyncClient(
                 expectedIndex = index,
                 expectedBatchCount = batchCount
             )
+            onFrame(frame, index)
             accumulator.append(frame)
             stats = stats + frameStats(frame)
             completed += 1

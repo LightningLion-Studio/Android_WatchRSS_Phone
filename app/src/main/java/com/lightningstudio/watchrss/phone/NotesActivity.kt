@@ -112,6 +112,7 @@ class NotesActivity : ComponentActivity() {
                         ::finish,
                         lifecycleScope,
                         container.cloudSyncService::syncNow,
+                        container::syncAfterNoteSave,
                         com.lightningstudio.watchrss.phone.cloud.rememberSyncV2UnopenableNoteIds(container.cloudSyncService)
                     )
                 }
@@ -128,6 +129,7 @@ private fun NotesScreen(
     onBack: () -> Unit,
     scope: CoroutineScope,
     syncCloud: suspend () -> Unit,
+    syncAfterNoteSave: suspend () -> Unit,
     unopenableNoteIds: Set<String> = emptySet()
 ) {
     // T-SYNCV2-UI §2.4: Sync v2 notes this phone cannot open are marked in the list
@@ -388,7 +390,7 @@ private fun NotesScreen(
                     note = renderedNote,
                     repository = repository,
                     scope = scope,
-                    syncCloud = syncCloud,
+                    syncCloud = syncAfterNoteSave,
                     showFullscreenControl = windowInfo.isMediumOrExpanded,
                     fullscreen = fullscreenLayerActive,
                     onToggleFullscreen = { editorFullscreen = !editorFullscreen },

@@ -151,7 +151,9 @@ class SyncV2P4ObjectsTest {
         val window=port.openWindow().getString("windowId")
         val mapping=port.reference("syncObjectsV2.stateRefsGet",JSONObject().put("scope",f.identity.scope).put("windowId",window).put("parentOid",state.oid))
         assertEquals(first.get("refsOid"),mapping.get("refsOid"));assertArrayEquals(raw,store.objectBytes(mapping.getString("refsOid")))
-        val damaged=raw.copyOf().also{it[it.lastIndex]=0};p4Error("hash_mismatch"){SyncV2ContentCodec.verifyRefs(f.identity,f.authors(),state.oid,JSONArray(),first,damaged)}
+        val damaged = raw.copyOf()
+        damaged[damaged.lastIndex] = (damaged.last().toInt() xor 0xFF).toByte()
+        p4Error("hash_mismatch"){SyncV2ContentCodec.verifyRefs(f.identity,f.authors(),state.oid,JSONArray(),first,damaged)}
     }}
 
 }

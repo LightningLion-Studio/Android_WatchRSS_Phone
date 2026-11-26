@@ -57,7 +57,7 @@ class FeatureDebugActivity : ComponentActivity() {
                 repository.changes.collectAsState(initial = null).value
                 container.accountRepository.session.collectAsState().value
                 container.cloudSyncService.cloudEntryChanges.collectAsState(initial = 0L).value
-                val snapshot = repository.debugSnapshot()
+                val snapshot = repository.debugSnapshot(container.cloudSyncService.hasCloudEntryAccess())
                 val scope = rememberCoroutineScope()
                 val overrideWrites = remember { Mutex() }
                 var refreshing by remember { mutableStateOf(false) }
@@ -83,10 +83,7 @@ class FeatureDebugActivity : ComponentActivity() {
                             }
                         }) { Text(if (refreshing) "正在刷新…" else "刷新云控") }
                         FeatureRegistry.entries.zip(snapshot.features).forEach { (feature, state) ->
-                            val enabled = if (feature == FeatureRegistry.cloudSyncEntry) {
-                                container.cloudSyncService.canOpenCloudSync()
-                            } else state.enabled
-                            FeatureDebugCard(state, enabled = enabled) { override ->
+                            FeatureDebugCard(state) { override ->
                                 scope.launch {
                                     overrideWrites.withLock { repository.setDebugOverride(feature, override) }
                                 }
@@ -109,7 +106,6 @@ class FeatureDebugActivity : ComponentActivity() {
 @Composable
 internal fun FeatureDebugCard(
     state: ClientFeatureDebugState,
-    enabled: Boolean,
     onOverrideChange: (FeatureOverride?) -> Unit
 ) {
     Card(Modifier.fillMaxWidth()) {
@@ -135,7 +131,7 @@ internal fun FeatureDebugCard(
                 }
             }
             Switch(
-                checked = enabled,
+                checked = state.enabled,
                 onCheckedChange = { checked ->
                     onOverrideChange(if (checked) FeatureOverride.ON else FeatureOverride.OFF)
                 },

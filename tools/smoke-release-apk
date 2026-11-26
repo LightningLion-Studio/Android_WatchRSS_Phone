@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""Run WatchRSS Phone release smoke checks on a disposable Android emulator."""
+
+import argparse
+from pathlib import Path
+import re
+import subprocess
+import time
+import uuid
+import xml.etree.ElementTree as ET
+
+PACKAGE = "com.lightningstudio.watchrss.phone"
+ERROR_TAG = "watchrss_release_smoke_error"
+# Historical APKs predate the tag. Their red error copy and retry states are visible in XML.
+ERROR_TEXT = re.compile(
+    r"Expected URL scheme|账号后端未配置|登录遇到问题？联系客服并提供上方提示|"
+    r"重新加载|登录已失效|无法读取云空间|会员状态读取失败|正文加载失败|"
+    r"加载失败|网络异常|网络错误|网络连接失败|请求失败|"
+    r"Unable to resolve host|Failed to connect|timeout|SSLHandshakeException",
+    re.IGNORECASE,
+)
+
+
+class SmokeFailure(Exception):
+    pass
+
+
+class Screen:
+    def __init__(self, nodes):
+        self.nodes = nodes
+        self.labels = [label for node in nodes for label in self.node_labels(node) if label]
+
+    @staticmethod
+    def node_labels(node):
+        return node.get("text", ""), node.get("content-desc", "")
+
+    def error(self):
+        for label, code in (("Expected URL scheme", "url_scheme"),
+                            ("账号后端未配置", "account_backend_unconfigured"),
+                            ("正文加载失败", "document_request_failed")):
+            if any(label in value for value in self.labels):
+                return code
+        if any(ERROR_TEXT.search(label) for label in self.labels) or any(
+            node.get("resource-id", "").rsplit("/", 1)[-1] == ERROR_TAG for node in self.nodes
+        ):
+            return "page_error"
+        return None
+
+
+class Emulator:
+    def __init__(self, serial, timeout):
+        self.serial = serial
+        self.timeout = timeout
+        self.dump_created = False
+        self.xml = f"/data/local/tmp/wrss-smoke-{uuid.uuid4().hex}.xml"
+
+    def adb(self, *args, timeout=20):
+        try:
+            result = subprocess.run(["adb", "-s", self.serial, *map(str, args)],
+                                    check=True, capture_output=True, timeout=timeout)
+            return result.stdout
+        except (OSError, subprocess.SubprocessError):
+            raise SmokeFailure("adb") from None
+
+    def screen(self):
+        self.adb("shell", "rm", "-f", self.xml)
+        self.dump_created = True
+        self.adb("shell", "uiautomator", "dump", self.xml)
+        xml = self.adb("exec-out", "cat", self.xml)
+        try:
+            nodes = list(ET.fromstring(xml).iter("node"))
+        except ET.ParseError:
+            raise SmokeFailure("uiautomator") from None
+        return Screen([node for node in nodes if node.get("package") == PACKAGE])
+
+    def wait(self, predicate, *, check_errors=True, seconds=None):
+        deadline = time.monotonic() + (self.timeout if seconds is None else seconds)
+        while time.monotonic() < deadline:
+            try:
+                screen = self.screen()
+            except SmokeFailure:
+                time.sleep(1)
+                continue
+            error = screen.error() if check_errors else None
+            if error:
+                raise SmokeFailure(error)
+            if predicate(screen):
+                return screen
+            time.sleep(0.5)
+        raise SmokeFailure("timed_out")
+
+    def tap(self, label):
+        self.tap_matching(lambda node: label in Screen.node_labels(node))
+
+    def tap_matching(self, matches):
+        screen = self.wait(lambda screen: any(matches(node) for node in screen.nodes))
+        node = next(node for node in screen.nodes if matches(node))
+        left, top, right, bottom = bounds(node)
+        self.adb("shell", "input", "tap", (left + right) // 2, (top + bottom) // 2)
+
+    def scroll(self, screen):
+        left, top, right, bottom = bounds(screen.nodes[0])
+        height = bottom - top
+        x = (left + right) // 2
+        self.adb("shell", "input", "swipe", x, top + height * 4 // 5,
+                 x, top + height // 3, 350)
+
+    def start(self):
+        self.adb("shell", "am", "force-stop", PACKAGE)
+        self.adb("shell", "am", "start", "-W", "-n", f"{PACKAGE}/.MainActivity")
+
+    def back(self):
+        self.adb("shell", "input", "keyevent", "KEYCODE_BACK")
+
+    def install(self, apk, *, upgrade=False):
+        flags = ["-r"] if upgrade else []
+        if b"Success" not in self.adb("install", *flags, apk, timeout=120):
+            raise SmokeFailure("install")
+
+
+def bounds(node):
+    values = re.fullmatch(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", node.get("bounds", ""))
+    if not values:
+        raise SmokeFailure("bounds")
+    return tuple(map(int, values.groups()))
+
+
+def oobe(emulator):
+    emulator.start()
+    emulator.tap("开始设置")
+    emulator.tap_matching(lambda node: node.get("class") == "android.widget.CheckBox"
+                          and node.get("checked") == "false")
+
+
+def fresh_login(emulator):
+    emulator.tap("同意并继续")
+    emulator.tap("登录账号")
+    emulator.wait(lambda screen: {"登录", "手机号"}.issubset(screen.labels))
+
+
+def legal_document(emulator):
+    # This screen uses an uncached HTTP GET, including before onboarding sign-in.
+    emulator.tap("查看《用户协议》")
+    try:
+        emulator.wait(lambda screen: "用户协议" in screen.labels and
+                      any(len(label) >= 200 for label in screen.labels))
+    finally:
+        emulator.back()
+        emulator.wait(lambda screen: "同意并继续" in screen.labels, check_errors=False)
+
+
+def has_home(screen):
+    return {"我的", "AI 客服"}.issubset(screen.labels)
+
+
+def wait_for_test_login(emulator, seconds):
+    print("test_account_sign_in_required", flush=True)
+    emulator.wait(has_home, seconds=seconds)
+
+
+def open_profile(emulator):
+    emulator.start()
+    emulator.wait(has_home)
+    emulator.tap("我的")
+
+
+def scan_page(emulator, title, success):
+    # Capture feedback below the fold as well as a positive response.
+    screen = emulator.wait(lambda screen: title in screen.labels)
+    succeeded = any(success(label) for label in screen.labels)
+    unchanged = 0
+    for _ in range(24):
+        if unchanged < 2:
+            emulator.scroll(screen)
+        next_screen = emulator.wait(lambda screen: title in screen.labels)
+        succeeded |= any(success(label) for label in next_screen.labels)
+        unchanged = unchanged + 1 if next_screen.labels == screen.labels else 0
+        if unchanged >= 2:
+            if succeeded:
+                return
+            break
+        screen = next_screen
+    raise SmokeFailure("request_confirmation_missing")
+
+
+def account(emulator):
+    open_profile(emulator)
+    emulator.tap("进入账号")
+    scan_page(emulator, "账号",
+              lambda label: label.startswith("可用方式：") and "正在读取" not in label)
+
+
+def cloud_sync(emulator):
+    open_profile(emulator)
+    emulator.tap("云同步")
+    scan_page(emulator, "云同步", lambda label: label.startswith("云备份可用 ·"))
+
+
+def support(emulator):
+    emulator.start()
+    emulator.wait(has_home)
+    emulator.tap("AI 客服")
+    emulator.wait(lambda screen: "AI 客服" in screen.labels and
+                  ("首次使用需同意 AI 客服服务协议" in screen.labels or "新对话" in screen.labels))
+
+
+def check(label, action):
+    try:
+        action()
+    except SmokeFailure as error:
+        print(f"{label} FAIL {error}", flush=True)
+        return False
+    print(f"{label} PASS", flush=True)
+    return True
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("apk", type=Path)
+    parser.add_argument("--emulator", required=True, help="Serial of a dedicated emulator-NNNN")
+    parser.add_argument("--previous", type=Path, help="Sign in on this APK before upgrading")
+    parser.add_argument("--fresh-only", action="store_true", help="Run only the clean-install checks")
+    parser.add_argument("--timeout", type=int, default=30, help="Seconds per screen")
+    parser.add_argument("--login-wait", type=int, default=300,
+                        help="Seconds for manual sign-in with a dedicated test account")
+    args = parser.parse_args()
+    if not re.fullmatch(r"emulator-\d+", args.emulator):
+        parser.error("--emulator must be an emulator-NNNN serial")
+    if args.previous and args.fresh_only:
+        parser.error("--previous requires the signed-in smoke checks")
+    if min(args.timeout, args.login_wait) <= 0:
+        parser.error("timeouts must be positive")
+    emulator = Emulator(args.emulator, args.timeout)
+
+    def setup():
+        if emulator.adb("shell", "getprop", "ro.kernel.qemu").strip() != b"1":
+            raise SmokeFailure("emulator_only")
+        packages = emulator.adb("shell", "pm", "list", "packages", PACKAGE).splitlines()
+        if f"package:{PACKAGE}".encode() in packages:
+            raise SmokeFailure("app_already_installed")
+        emulator.install(args.apk)
+        oobe(emulator)
+
+    try:
+        if not check("fresh_install", setup):
+            return 1
+        legal_ok = check("legal_document", lambda: legal_document(emulator))
+        fresh_ok = check("fresh_phone_login", lambda: fresh_login(emulator))
+        if args.fresh_only:
+            return 0 if legal_ok and fresh_ok else 1
+        if not fresh_ok:
+            return 1
+
+        def authenticated_install():
+            if args.previous:
+                emulator.adb("uninstall", PACKAGE)
+                emulator.install(args.previous)
+                oobe(emulator)
+                fresh_login(emulator)
+            wait_for_test_login(emulator, args.login_wait)
+            if args.previous:
+                emulator.install(args.apk, upgrade=True)
+
+        if not check("test_session", authenticated_install):
+            return 1
+        results = [check(label, lambda: action(emulator))
+                   for label, action in (("account", account), ("cloud_sync", cloud_sync),
+                                         ("ai_support", support))]
+        return 0 if all([legal_ok, fresh_ok, *results]) else 1
+    finally:
+        try:
+            if emulator.dump_created:
+                emulator.adb("shell", "rm", "-f", emulator.xml)
+        except SmokeFailure:
+            pass
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

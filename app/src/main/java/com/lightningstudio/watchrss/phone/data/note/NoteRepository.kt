@@ -5,6 +5,14 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.emitAll
 import java.util.UUID
 
+data class NoteRemoteWrites(val changedNotes: Int = 0, val addedConflicts: Int = 0)
+
+data class NoteRemoteApplyResult(
+    val mergeResult: MarkdownMergeResult,
+    val changedNotes: Int = 0,
+    val addedConflicts: Int = 0
+)
+
 class NoteRepository(
     private val dao: NoteDao,
     private val deviceId: String,
@@ -134,13 +142,18 @@ class NoteRepository(
         { maxOf(it.updatedAt, it.deletedAt) }, { it.modifiedBy }, { it.deleted }, { it.title },
         { it.folderId != null }, { it.folderId.orEmpty() }, { it.pinned }, { it.createdAt }, { it.baseContentHash }, { it.baseMarkdown })
 
-    suspend fun applyRemote(remote: NoteEntity, remoteDeviceId: String): MarkdownMergeResult {
+    suspend fun applyRemote(remote: NoteEntity, remoteDeviceId: String): MarkdownMergeResult =
+        applyRemoteWithChanges(remote, remoteDeviceId).mergeResult
+
+    suspend fun applyRemoteWithChanges(remote: NoteEntity, remoteDeviceId: String): NoteRemoteApplyResult {
         val receipt = NoteRemoteReceiptEntity(noteRemoteSnapshotHash(remote, remoteDeviceId), remote.noteId)
         repeat(8) {
             val local = dao.note(remote.noteId)
-            if (local != null && dao.hasRemoteReceipt(receipt.snapshotHash)) return MarkdownMergeResult.Merged(local?.markdown ?: remote.markdown)
+            if (local != null && dao.hasRemoteReceipt(receipt.snapshotHash)) return NoteRemoteApplyResult(MarkdownMergeResult.Merged(local.markdown))
             if (local == remote) {
-                if (dao.commitRemoteNote(remote.noteId, local, null, null, receipt)) return MarkdownMergeResult.Merged(remote.markdown)
+                if (dao.commitRemoteNote(remote.noteId, local, null, null, receipt) != null) {
+                    return NoteRemoteApplyResult(MarkdownMergeResult.Merged(remote.markdown))
+                }
                 return@repeat
             }
             var value: NoteEntity? = remote
@@ -182,7 +195,9 @@ class NoteRepository(
                     }
                 }
             }
-            if (dao.commitRemoteNote(remote.noteId, local, value, conflict, receipt)) return result
+            dao.commitRemoteNote(remote.noteId, local, value, conflict, receipt)?.let { writes ->
+                return NoteRemoteApplyResult(result, writes.changedNotes, writes.addedConflicts)
+            }
         }
         error("notes_stale")
     }

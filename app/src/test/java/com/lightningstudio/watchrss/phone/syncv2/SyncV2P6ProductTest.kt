@@ -29,6 +29,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
@@ -77,6 +78,7 @@ class SyncV2P6ProductTest {
         var account=JSONObject().put("commitOid",JSONObject.NULL).put("revision","0").put("rollbackGeneration","0")
         var closedBodyChannel=false;var bodyRequests=0
         var headResponse: () -> MockResponse = { MockResponse().setResponseCode(404) }
+        var deviceAuthorization = "Bearer synthetic-device"
         val headRequests = java.util.concurrent.CopyOnWriteArrayList<RecordedRequest>()
         var blockBodyList = false
         var publishes=0;var acks=0;var inits=0;var queries=0;var dropPublish=false;var failQuery=false
@@ -94,7 +96,12 @@ class SyncV2P6ProductTest {
             http.dispatcher=object:Dispatcher(){override fun dispatch(r:RecordedRequest):MockResponse {
                 try {
                     assertEquals("Bearer synthetic-account",r.getHeader("Authorization"));assertEquals("synthetic-api",r.getHeader("apikey"))
-                    assertEquals("Bearer synthetic-device",r.getHeader("x-watchrss-device-authorization"))
+                    val route=r.requestUrl!!.encodedPath.removePrefix(SyncV2Origin.path)
+                    if (route == "account/head") {
+                        headRequests += r
+                        return headResponse()
+                    }
+                    assertEquals(deviceAuthorization,r.getHeader("x-watchrss-device-authorization"))
                     if(closedBodyChannel && r.requestUrl!!.encodedPath.startsWith("/functions/v1/cloud/bodies/v1/")) {
                         bodyRequests++
                         if (r.method == "GET" && blockBodyList) {
@@ -104,11 +111,6 @@ class SyncV2P6ProductTest {
                         }
                         if(r.method!="GET")return error("body_channel_write_disabled").setResponseCode(503)
                         return response(JSONObject().put("version",1).put("purpose",SyncV2BodyCodec.PURPOSE).put("scope",scope()).put("carriers",JSONArray()).put("nextAfter",JSONObject.NULL))
-                    }
-                    val route=r.requestUrl!!.encodedPath.removePrefix(SyncV2Origin.path)
-                    if (route == "account/head") {
-                        headRequests += r
-                        return headResponse()
                     }
                     if(route==block){block=null;entered.countDown();assertTrue(unblock.await(10,TimeUnit.SECONDS))}
                     val s=JSONObject().put("repoId",r.requestUrl!!.queryParameter("repoId")).put("libraryEpoch",r.requestUrl!!.queryParameter("libraryEpoch")).put("contentGeneration",r.requestUrl!!.queryParameter("contentGeneration"))
@@ -357,6 +359,36 @@ class SyncV2P6ProductTest {
             }finally{life.close()}
         }}
     }
+    @Test fun receivingNotesRefreshesAnExistingRoomObserverAfterOneCheckpoint() = runBlocking {
+        Server().use { server ->
+            Host(server, "sender", bodyChannel = false).use { sender ->
+                sender.note("before")
+                sender.sync()
+                Host(server, "receiver", bodyChannel = false).use { receiver ->
+                    receiver.sync()
+                    val initial = CompletableDeferred<Unit>()
+                    val updated = async {
+                        withTimeout(10_000) {
+                            receiver.room.noteDao().observeNotes().first { notes ->
+                                if (notes.any { it.markdown == "before" }) initial.complete(Unit)
+                                notes.any { it.markdown == "after" }
+                            }
+                        }
+                    }
+                    withTimeout(10_000) { initial.await() }
+
+                    sender.note("after")
+                    sender.sync()
+                    val checkpoints = server.checkpoints
+                    receiver.sync()
+
+                    assertEquals(checkpoints + 1, server.checkpoints)
+                    assertEquals("after", updated.await().single().markdown)
+                }
+            }
+        }
+    }
+
     @Test fun realCreateScanPublishRoomApplyReceiverAndSubsequentSchedule() {
         Server().use {server->Host(server,"a").use{a->
             a.note();assertTrue(a.sync().enabled);assertEquals(1,server.publishes);assertEquals("local",server.values().single().getString("markdown"));assertTrue(server.acks>0)
@@ -478,7 +510,8 @@ class SyncV2P6ProductTest {
             }
         }}
         Server().use {server->Host(server,"creator").use{a->
-            a.note();a.sync();server.capsule=JSONObject(server.capsule!!.toString()).put("ciphertext","AAAA")
+            a.note();a.sync()
+            server.capsule = SyncV2Fixtures.tamperRecoveryCapsule(requireNotNull(server.capsule))
             Host(server,"receiver").use {b->
                 b.note("local retained")
                 assertNotNull(runCatching{b.sync()}.exceptionOrNull());assertEquals("local retained",b.text())
@@ -716,7 +749,8 @@ class SyncV2P6ProductTest {
         roundTimeoutMillis: Long? = null,
         sessionPreferences: SharedPreferences = MemoryPreferences(),
         statePreferences: SharedPreferences = MemoryPreferences(),
-        cloudEntryEnabled: () -> Boolean = { true }
+        cloudEntryEnabled: () -> Boolean = { true },
+        refreshHeadDevice: suspend (String, String) -> Boolean = { _, _ -> false }
     ):AutoCloseable {
         private val c=h.context
         private val epoch="11111111-1111-4111-8111-111111111111"
@@ -755,7 +789,10 @@ class SyncV2P6ProductTest {
             syncChangeLogDao=h.room.syncChangeLogDao(),syncPeerStateDao=h.room.syncPeerStateDao(),appMetaDao=h.room.appMetaDao(),
             articleContentStore=FileArticleContentStore(c))
         private val reader=com.lightningstudio.watchrss.phone.data.reader.ReaderPresetRepository(c,h.room,h.room.readerPresetDao(),h.id,scope)
-        private val client=com.lightningstudio.watchrss.phone.cloud.PhoneCloudClient(env,http=okhttp3.OkHttpClient.Builder().addInterceptor{chain->
+        private val client=com.lightningstudio.watchrss.phone.cloud.PhoneCloudClient(env,
+            deviceAccessToken = { h.account?.deviceAuthorization?.removePrefix("Bearer ") },
+            refreshDeviceSession = refreshHeadDevice,
+            http=okhttp3.OkHttpClient.Builder().addInterceptor{chain->
             val request=chain.request()
             val path = request.url.encodedPath
             val bootstrap = path.endsWith("/bootstrap")
@@ -955,6 +992,75 @@ class SyncV2P6ProductTest {
             assertEquals(state, entry.service.state.value)
             assertEquals(ui, host.product.uiPort.value!!.state.value)
         } } }
+    }
+
+    @Test fun headPollRetriesRejectedDeviceTokenInTheSameRound() = runBlocking {
+        for ((status, code) in listOf(403 to "scope_mismatch", 401 to "authentication_required")) {
+            Server().use { server -> Host(server, "head-refresh").use { host ->
+                var refreshes = 0
+                ServiceEntry(host, refreshHeadDevice = { token, owner ->
+                    assertEquals("synthetic-device", token)
+                    assertEquals(user, owner)
+                    refreshes++
+                    server.deviceAuthorization = "Bearer rotated-device"
+                    host.account = host.account!!.copy(deviceAuthorization = server.deviceAuthorization)
+                    true
+                }).use { entry ->
+                    entry.approvedForHead = true
+                    host.note()
+                    assertTrue(entry.service.syncNow().completed)
+                    val poller = PhoneCloudHeadPoller({ 0 }, { 0 })
+                    server.headResponse = {
+                        if (server.headRequests.size == 1) {
+                            MockResponse().setResponseCode(status).setBody("""{"error":{"code":"$code"}}""")
+                        } else {
+                            MockResponse().setResponseCode(304)
+                        }
+                    }
+                    assertTrue(entry.service.pollCloudHead(poller) { true })
+                    assertEquals(1, refreshes)
+                    assertEquals(listOf("Bearer synthetic-device", "Bearer rotated-device"),
+                        server.headRequests.map { it.getHeader("x-watchrss-device-authorization") })
+                    assertTrue(poller.available.value)
+                }
+            } }
+        }
+    }
+
+    @Test fun headPollStopsAfterOneRetryAndKeepsTheNextChangedHeadEligible() = runBlocking {
+        Server().use { server -> Host(server, "head-bounded").use { host ->
+            var refreshes = 0
+            ServiceEntry(host, refreshHeadDevice = { _, _ ->
+                refreshes++
+                server.deviceAuthorization = "Bearer rotated-device"
+                host.account = host.account!!.copy(deviceAuthorization = server.deviceAuthorization)
+                true
+            }).use { entry ->
+                entry.approvedForHead = true
+                host.note()
+                assertTrue(entry.service.syncNow().completed)
+                val poller = PhoneCloudHeadPoller({ 0 }, { 0 })
+                server.headResponse = {
+                    MockResponse().setResponseCode(403).setBody("""{"error":{"code":"scope_mismatch"}}""")
+                }
+                assertTrue(entry.service.pollCloudHead(poller) { true })
+                assertEquals(1, refreshes)
+                assertEquals(2, server.headRequests.size)
+                assertFalse(poller.available.value)
+
+                val bootstraps = entry.bootstraps
+                server.headResponse = {
+                    server.response(JSONObject().put("etag", "next-head")
+                        .put("head", server.account.get("commitOid")).put("epoch", "1")
+                        .put("signingKeysRev", "1").put("pollAfterMs", 20_000))
+                        .setHeader("ETag", "\"next-head\"")
+                }
+                assertTrue(entry.service.pollCloudHead(poller) { true })
+                assertTrue(poller.available.value)
+                assertEquals(bootstraps + 1, entry.bootstraps)
+                assertEquals(1, refreshes)
+            }
+        } }
     }
 
     @Test fun headPollUnsupportedMatchesLegacySyncAndAddsNoPrompt() = runBlocking {

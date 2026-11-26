@@ -806,10 +806,12 @@ class PhoneCloudSyncService(
         // the epoch and commitments before using any key.
         accountRepository.session.value?.let(::hasTrustedCloudKey) == true
 
-    internal fun canOpenCloudSync(): Boolean = accountRepository.session.value?.let { session ->
+    internal fun hasCloudEntryAccess(): Boolean = accountRepository.session.value?.let { session ->
         settings.wasCloudSyncEnabled(client.scopeId(session)) || cloudResetPaused(session) ||
             keyManager.hasAccountKey(session.userId) || (usesSyncV2 && pendingCloudReset(session.userId) != null)
-    } == true || cloudEntryEnabled()
+    } == true
+
+    internal fun canOpenCloudSync(): Boolean = hasCloudEntryAccess() || cloudEntryEnabled()
 
     private fun CloudBootstrap.hasCloudActivationHistory(): Boolean = libraryEpoch.isNotBlank() &&
         (keyCommitments.isNotEmpty() || keyEnvelopes.isNotEmpty() || legacyKeyVersions.isNotEmpty() || keyVersionFloor > 0)
@@ -1656,7 +1658,12 @@ class PhoneCloudSyncService(
                                 val job = currentCoroutineContext()[kotlinx.coroutines.Job]!!
                                 if (!bluetoothFence.startHeadProbe(job)) return@probe null
                                 try {
-                                    if (eligible()) syncV2Product.probeHead(owner, etag) else null
+                                    client.withAccountHeadSession(session.userId) { token ->
+                                        if (eligible()) {
+                                            val header = token?.takeIf { it.isNotBlank() }?.let { "Bearer $it" }
+                                            syncV2Product.probeHead(owner, etag, header)
+                                        } else null
+                                    }
                                 } finally {
                                     bluetoothFence.finishHeadProbe(job)
                                 }

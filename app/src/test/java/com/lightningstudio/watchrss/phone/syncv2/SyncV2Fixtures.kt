@@ -9,6 +9,11 @@ internal object SyncV2Fixtures {
         val v=vector("identity-bootstrap"); val context=v.getJSONObject("context")
         return SyncV2Identity.recover(v.getJSONObject("capsule"),v.getJSONObject("descriptor"),SyncV2Codec.unhex(v.getString("wrapKeyHex"),32),context.getString("accountId"),context.getJSONObject("scope"),v.getJSONObject("request").getString("descriptorOid"))
     }
+    fun tamperRecoveryCapsule(capsule: JSONObject): JSONObject {
+        val ciphertext = SyncV2Codec.decode64(capsule.getString("ciphertext"))
+        ciphertext[0] = (ciphertext[0].toInt() xor 0xFF).toByte()
+        return JSONObject(capsule.toString()).put("ciphertext", SyncV2Codec.b64(ciphertext))
+    }
     val localKey=ByteArray(32){0x55}
     fun envelope(): JSONObject {
         val c=vector("commit").getJSONArray("cases").getJSONObject(0)

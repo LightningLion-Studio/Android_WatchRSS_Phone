@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryDisconnectLimit
 import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryNoProgressLimit
+import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryProgressHold
 import com.lightningstudio.watchrss.phone.connection.bluetooth.LibraryReconnectLimit
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncProgress
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncManager
@@ -216,6 +217,7 @@ class MainViewModel(
     private var clearWatchSelection: CompletableDeferred<PhoneBluetoothWatchDevice?>? = null
     private var clearWatchCandidates: List<PhoneBluetoothWatchDevice> = emptyList()
     private var conflictResolutionDeferred: CompletableDeferred<PhoneSyncConflictResolution>? = null
+    private val libraryProgressHold = LibraryProgressHold()
     private var smoothedSyncProgressJob: Job? = null
     private var smoothedSyncProgressTarget: MainSyncProgressUi? = null
     private var verificationTransitionJob: Job? = null
@@ -1600,7 +1602,8 @@ class MainViewModel(
     }
 
     private fun updateLibrarySyncProgress(progress: PhoneBluetoothSyncProgress) {
-        val percent = progress.percent.coerceIn(0, 100)
+        val percent = libraryProgressHold.percent(progress.stage == PhoneBluetoothSyncStage.RECONNECTING,
+            progress.percent, sessionState.value.syncProgress?.percent).coerceIn(0, 100)
         val uiProgress = MainSyncProgressUi(
             phase = if (progress.reconnectAttempt > 0) "连接中断，正在重连（第 ${progress.reconnectAttempt} 次）" else progress.stage.displayName,
             percent = percent,
@@ -1665,6 +1668,7 @@ class MainViewModel(
         } ?: "RFCOMM"
 
     private fun beginSmoothedSyncProgress(progress: MainSyncProgressUi) {
+        libraryProgressHold.reset()
         smoothedSyncProgressJob?.cancel()
         smoothedSyncProgressJob = null
         smoothedSyncProgressTarget = progress

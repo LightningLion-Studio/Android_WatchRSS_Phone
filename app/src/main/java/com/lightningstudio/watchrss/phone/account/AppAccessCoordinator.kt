@@ -180,7 +180,10 @@ class AppAccessCoordinator(
         if (cachedValid) store.recordTrustedTime(trustedNow!!)
         if (cached != null && !cachedValid && !refreshWithoutTime) store.clear()
         val hasUsableSession = accountRepository.hasUsableSession
-        initialAppAccessState(cached?.access, cachedValid, hasUsableSession)?.let { _state.value = it }
+        val offlineBlocked = accountRepository.session.value?.userId
+            ?.let(accountRepository::offlineAuthorizationBlocked) == true
+        initialAppAccessState(cached?.access, cachedValid, hasUsableSession, offlineBlocked)
+            ?.let { _state.value = it }
         if (!hasUsableSession) WatchAccountRefreshResult.AccountUnrecoverable()
         else {
             val order = store.loadPendingOrder(accountRepository.session.value!!.userId)
@@ -190,9 +193,7 @@ class AppAccessCoordinator(
                     refreshPaymentLocked(order.orderId)
                 }
                 cached == null || (!cachedValid && !refreshWithoutTime) -> loadServerStatusLocked()
-                else -> refreshLeaseLocked(requireNotNull(cached), rejectedToken ?: cached.deviceAccessToken.takeIf {
-                    accountRepository.offlineAuthorizationBlocked(accountRepository.session.value!!.userId)
-                })
+                else -> refreshLeaseLocked(requireNotNull(cached), rejectedToken ?: cached.deviceAccessToken.takeIf { offlineBlocked })
             }
         }
     } catch (error: Throwable) { accountSyncFailureResult(error) }
@@ -426,8 +427,11 @@ internal data class ValidLeaseRefreshDecision(
 internal fun initialAppAccessState(
     cachedSummary: AppAccessSummary?,
     cachedLeaseValid: Boolean,
-    hasUsableSession: Boolean
+    hasUsableSession: Boolean,
+    offlineBlocked: Boolean
 ): AppAccessState? = when {
+    offlineBlocked && !hasUsableSession -> AppAccessState.LoggedOut
+    offlineBlocked -> AppAccessState.ValidationError("需要联网完成账号验证")
     cachedLeaseValid && cachedSummary != null ->
         AppAccessState.Authorized(cachedSummary, offline = true)
     !hasUsableSession -> AppAccessState.LoggedOut

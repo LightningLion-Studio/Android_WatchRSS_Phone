@@ -80,7 +80,7 @@ class MainActivity : ComponentActivity() {
                 val state by coordinator.state.collectAsState()
                 val onboardingComplete = oobeComplete.value
                 LaunchedEffect(state, onboardingComplete) {
-                    if (onboardingComplete && state is AppAccessState.Authorized) {
+                    if (onboardingComplete && state is AppAccessState.Authorized && coordinator.isAuthorized) {
                         enterApplication()
                     }
                 }

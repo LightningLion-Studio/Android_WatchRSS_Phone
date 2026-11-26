@@ -18,14 +18,26 @@ class AppAccessReconciliationPolicyTest {
     fun validLeaseAllowsOfflineAccessWithoutAnAccountSession() {
         assertEquals(
             AppAccessState.Authorized(cached, offline = true),
-            initialAppAccessState(cached, cachedLeaseValid = true, hasUsableSession = false)
+            initialAppAccessState(cached, cachedLeaseValid = true, hasUsableSession = false, offlineBlocked = false)
         )
         assertEquals(
             AppAccessState.LoggedOut,
-            initialAppAccessState(cached, cachedLeaseValid = false, hasUsableSession = false)
+            initialAppAccessState(cached, cachedLeaseValid = false, hasUsableSession = false, offlineBlocked = false)
         )
         assertNull(
-            initialAppAccessState(cached, cachedLeaseValid = false, hasUsableSession = true)
+            initialAppAccessState(cached, cachedLeaseValid = false, hasUsableSession = true, offlineBlocked = false)
+        )
+    }
+
+    @Test
+    fun blockedOfflineLeaseNeverOpensTheHomeScreenBeforeOnlineRefresh() {
+        assertEquals(
+            AppAccessState.ValidationError("需要联网完成账号验证"),
+            initialAppAccessState(cached, cachedLeaseValid = true, hasUsableSession = true, offlineBlocked = true)
+        )
+        assertEquals(
+            AppAccessState.LoggedOut,
+            initialAppAccessState(cached, cachedLeaseValid = true, hasUsableSession = false, offlineBlocked = true)
         )
     }
 

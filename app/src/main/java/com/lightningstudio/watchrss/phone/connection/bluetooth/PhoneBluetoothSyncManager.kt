@@ -75,7 +75,7 @@ data class PhoneBluetoothSyncResult(
     val tokenUsageSyncWarning: String? = null,
     val bookSyncIssues: List<BookSyncIssue> = emptyList()
 ) {
-    val bookSyncWarning:String? get()=bookSyncIssues.takeIf{it.isNotEmpty()}?.let{"${it.size} 本书的包校验失败，已隔离；可直接点同步重试"}
+    val bookSyncWarning:String? get()=BookSyncWarningText.format(bookSyncIssues)
 }
 
 internal data class PhoneBluetoothProbeTargets(
@@ -604,6 +604,7 @@ class PhoneBluetoothSyncManager(
         mode: LibrarySyncMode = LibrarySyncMode.MERGE,
         reusableSession: PhoneSyncSession? = null,
         sessionRollout: B2RolloutDecision? = null,
+        includeNoteAssets: Boolean = true,
         onProgress: (PhoneBluetoothSyncProgress) -> Unit = {},
         resolveDeleteConflicts: suspend (List<PhoneSyncDeleteConflict>) -> Map<String, PhoneSyncConflictResolution> = {
             emptyMap()
@@ -613,7 +614,7 @@ class PhoneBluetoothSyncManager(
         return telemetry.runBtSync {
             withAccountOperation {
                 withContext(LibraryManifestRetry()) {
-                    syncAllData(device, forceFull, mode, reusableSession, sessionRollout, onProgress, resolveDeleteConflicts)
+                    syncAllData(device, forceFull, mode, reusableSession, sessionRollout, includeNoteAssets, onProgress, resolveDeleteConflicts)
                 }
             }
         }
@@ -625,6 +626,7 @@ class PhoneBluetoothSyncManager(
         mode: LibrarySyncMode = LibrarySyncMode.MERGE,
         reusableSession: PhoneSyncSession? = null,
         sessionRollout: B2RolloutDecision? = null,
+        includeNoteAssets: Boolean = true,
         onProgress: (PhoneBluetoothSyncProgress) -> Unit = {},
         resolveDeleteConflicts: suspend (List<PhoneSyncDeleteConflict>) -> Map<String, PhoneSyncConflictResolution> = {
             emptyMap()
@@ -705,7 +707,7 @@ class PhoneBluetoothSyncManager(
         var binaryProbe: JSONObject? = null
         var binaryRouteChosen = false
         var binaryRoute = B2KindRoute.legacy
-        fun selectBinary(probe: JSONObject) = B2KindRoute.select(probe, includeNoteAssets = binaryAllowed,
+        fun selectBinary(probe: JSONObject) = B2KindRoute.select(probe, includeNoteAssets = binaryAllowed && includeNoteAssets,
             libraryReady = binaryLibraryReady, booksReady = binaryBooksReady, guarded = guardedBinary)
         val binaryRecovery = if (binaryAllowed) LibraryTransferRecovery(SystemClock::elapsedRealtime, reconnectDelay) {
             onProgress(PhoneBluetoothSyncProgress(PhoneBluetoothSyncStage.RECONNECTING, 0, reconnectAttempt = it))
@@ -784,6 +786,13 @@ class PhoneBluetoothSyncManager(
             onReady = { debugLog.appendEvent("library.reconnect.ready", sessionId) },
             onProgressConfirmed = { manifestRetry?.confirmedProgress() }
         )
+        var checkpointLocalArticle: suspend (String) -> PhoneArticleEntity? = { null }
+        val articleCheckpoint = PhoneArticleReceiveCheckpoint(
+            File(appContext.cacheDir, "library-receive/$sessionId"),
+            owner.orEmpty(), effectiveDevice.remoteDeviceId.ifBlank { effectiveDevice.address },
+            localArticle = { checkpointLocalArticle(it) },
+            confirmed = recovery::confirmedProgress
+        )
         fun recordApplied(count: Int) {
             if (count > 0) {
                 locallyApplied = true
@@ -840,7 +849,6 @@ class PhoneBluetoothSyncManager(
             }
             val binaryRuntimes = if (binaryRecovery != null) {
                 val active = accountRecovery { binding() }
-                binaryRouteChosen = true
                 val probe = binaryProbe
                 val eligible = probe != null && if (guardedBinary) {
                     isB2RolloutEligible(true, probe)
@@ -860,13 +868,27 @@ class PhoneBluetoothSyncManager(
                     if (!route.isEmpty && guardedBinary && currentBinaryScope() != guardedScope) {
                         throw B2Exception("AUTH_REVOKED")
                     }
+                    val peerPackages = if (route.hasBinaryBooks && B2BookState.negotiated(probe)) {
+                        accountRecovery {
+                            val bookSession = binding().session
+                            val currentProbe = binaryProbe
+                            if (bookSession?.isPersistent != true || currentProbe == null ||
+                                !selectBinary(currentProbe).contains(route)) throw B2Exception("CAPABILITY_MISMATCH")
+                            if (guardedBinary && currentBinaryScope() != guardedScope) throw B2Exception("AUTH_REVOKED")
+                            if (!B2BookState.negotiated(currentProbe)) emptyMap()
+                            else withTimeout(QUICK_EXCHANGE_TIMEOUT_MS) {
+                                withContext(Dispatchers.IO) { B2BookState.exchange(bookSession, sessionId) }
+                            }
+                        }
+                    } else emptyMap()
                     route.plans().mapNotNull { plan ->
-                        val (selected, runtime) = prepareBinaryRoute(plan, probe, effectiveDevice,
+                        val (selected, runtime) = prepareBinaryRoute(plan, binaryProbe ?: probe, effectiveDevice, peerPackages,
                             binaryRecovery::confirmedProgress)
                         if (runtime == null) null else (selected to runtime).also { binaryRoute += selected }
                     }
                 }
             } else emptyList()
+            binaryRouteChosen = true
             accountRecovery {
             val active=binding()
             if(binaryRoute.isEmpty && repository.bleDomains!=null && DomainFastPath.enabled(active.capabilities,syncSession?.isPersistent==true,forceFull,mode)) {
@@ -924,7 +946,14 @@ class PhoneBluetoothSyncManager(
                     bookSync.diagnosticItem={id,result,code->trace.item("book",id,result,code)}
                     bookSync.domainFastPath=fastPath!=null
                     bookSync.onApplied = ::recordApplied
-                    bookSync.onIssue={issue->trace.item("book",issue.bookIdPrefix,"rejected",issue.code,issue.title,issue.reason);debugLog.appendEvent("sync.book.isolated",sessionId,fields=mapOf("bookId" to issue.bookIdPrefix,"code" to issue.code))}
+                    bookSync.onIssue = { issue ->
+                        trace.item("book", issue.bookIdPrefix, "rejected", issue.code, issue.title, issue.reason)
+                        debugLog.appendEvent("sync.book.isolated", sessionId, fields = mapOf(
+                            "kind" to "book", "id" to issue.bookIdPrefix, "bookIdPrefix" to issue.bookIdPrefix,
+                            "bookId" to issue.bookIdPrefix, "code" to issue.code,
+                            "title" to issue.title, "reason" to issue.reason
+                        ))
+                    }
                     bookSync.trace={stage->debugLog.appendEvent("sync.book.stage",sessionId,fields=mapOf("stage" to stage))}
                     val physicalSession=syncSession
                     if(active.capabilities.bookReadingDelta && physicalSession?.isPersistent==true) {
@@ -954,7 +983,9 @@ class PhoneBluetoothSyncManager(
                     booksPrepared = true,
                     domainWitness = rootWindow,
                     binaryRoute = binaryRoute,
-                    resolveDeleteConflicts = resolveDeleteConflicts).also {
+                    resolveDeleteConflicts = resolveDeleteConflicts,
+                    articleCheckpoint = articleCheckpoint,
+                    bindCheckpointLocalArticle = { checkpointLocalArticle = it }).also {
                         completedDomains.add("library")
                         it.libraryStats?.let { stats ->
                             telemetry?.legacyObjects(stats.sent + stats.received, stats.sourcesSent + stats.sourcesReceived, 0)
@@ -979,9 +1010,9 @@ class PhoneBluetoothSyncManager(
                     reportProgress(onProgress, PhoneBluetoothSyncStage.SYNCING_NOTES, 0)
                     syncNotes(effectiveDevice.address, sessionId, syncSession, libraryDeclarations?.let { binding().capabilities.withDeclarations(it) } ?: binding().capabilities,
                         onLocalApplied = ::recordApplied, legacyVersion = binding().response.optInt("version"),
-                        syncAssets = B2_NOTE_ASSET !in binaryRoute.send).also {
+                        syncAssets = includeNoteAssets && B2_NOTE_ASSET !in binaryRoute.send).also {
                             if (it.appliedOnWatch > 0) recovery.confirmedProgress()
-                            completedDomains.add("notes")
+                            if (includeNoteAssets && !binaryRoute.hasBinaryAssets) completedDomains.add("notes")
                             telemetry?.legacyObjects(0, 0, it.sent + it.received)
                         }
                 }
@@ -1043,7 +1074,11 @@ class PhoneBluetoothSyncManager(
             syncSession = null
             debugLog.appendEvent("sync.session.closed", sessionId)
         }
-        val completed = withContext(LibraryB2ProbeOffer(binaryAllowed)) { syncLibraryTransport() }
+        val completed = try {
+            withContext(LibraryB2ProbeOffer(binaryAllowed)) { syncLibraryTransport() }
+        } finally {
+            articleCheckpoint.close()
+        }
         onSyncActiveChanged(false) // The physical session is closed before any asynchronous cloud enqueue.
         val changed = completed.hasActualLibraryChanges() || locallyApplied || booksApplied > 0
         debugLog.appendEvent("sync.cloud.decision", sessionId, mapOf("actualChanges" to changed,"articlesMerged" to (completed.libraryStats?.merged?:0),"sourcesMerged" to (completed.libraryStats?.sourcesMerged?:0),"booksApplied" to booksApplied,"localApplied" to locallyApplied,"notesPhone" to (completed.noteStats?.appliedOnPhone?:0),"notesWatch" to (completed.noteStats?.appliedOnWatch?:0)))
@@ -1156,12 +1191,15 @@ class PhoneBluetoothSyncManager(
         binaryRoute: B2KindRoute = B2KindRoute.legacy,
         resolveDeleteConflicts: suspend (List<PhoneSyncDeleteConflict>) -> Map<String, PhoneSyncConflictResolution> = {
             emptyMap()
-        }
+        },
+        articleCheckpoint: PhoneArticleReceiveCheckpoint? = null,
+        bindCheckpointLocalArticle: (suspend (String) -> PhoneArticleEntity?) -> Unit = {}
     ): PhoneBluetoothSyncResult {
         val enclosing = currentCoroutineContext()[AccountDataSession]?.session
         if (enclosing == null || (syncSession != null && enclosing !== syncSession)) return withAccountDataSession(deviceAddress, syncSession) { active ->
             syncLibrary(active.device.address, active, forceFull, mode, onProgress, null, syncAuxiliary, booksPrepared,
-                domainWitness, onLocalApplied, onLibraryManifest, binaryRoute, resolveDeleteConflicts)
+                domainWitness, onLocalApplied, onLibraryManifest, binaryRoute, resolveDeleteConflicts,
+                articleCheckpoint, bindCheckpointLocalArticle)
         }
         val splitLibrary = binaryRoute.hasBinaryLibrary
         val legacySendArticles = binaryRoute.sendLegacyArticles
@@ -1201,6 +1239,40 @@ class PhoneBluetoothSyncManager(
                 "targetAddress" to deviceAddress.orEmpty()
             )
         )
+        // Guarded sessions retain the whole-response account commit boundary.
+        val checkpoint = articleCheckpoint?.takeIf {
+            mode == LibrarySyncMode.MERGE && legacyReceiveArticles &&
+                legacyCommit == null && syncSession?.isPersistent == true
+        }
+        val mergedBeforeAttempt = checkpoint?.merged ?: 0
+        val checkpointOwner = currentPhoneUserId()
+        val checkpointFence = b2AccountFence()
+        var checkpointChunked = false
+        suspend fun applyCheckpoint(payload: ChunkedArticlePayload): Boolean {
+            checkpointFence?.check()
+            check(checkpointOwner == currentPhoneUserId() && canSyncAccount()) { "AUTH_REVOKED" }
+            return try {
+                requireNotNull(checkpoint).apply(payload) { verified ->
+                    repository.mergeChunkedArticlesFromSync(listOf(identityProjection.incoming(verified)),
+                        conflictMergeResolutions).also(onLocalApplied)
+                }
+            } catch (failure: java.io.IOException) {
+                throw IllegalArgumentException("保存同步正文检查点失败", failure)
+            }
+        }
+        val checkpointExchange = checkpoint?.let { cache ->
+            LibraryArticleCheckpointExchange(receiveFrame = { frame, apply ->
+                if (checkpointChunked) {
+                    try {
+                        LibrarySyncPayload.parseChunkedArticles(frame).forEach { payload ->
+                            if (apply) applyCheckpoint(payload) else cache.stage(payload)
+                        }
+                    } catch (failure: java.io.IOException) {
+                        throw IllegalArgumentException("保存同步正文检查点失败", failure)
+                    }
+                }
+            }, isApplied = cache::isApplied)
+        }
         return runCatching {
             val initialCursor = repository.getLibrarySyncCursor(null)
             val exchange = exchangeLibrary(
@@ -1321,8 +1393,12 @@ class PhoneBluetoothSyncManager(
                         identityProjection.acceptAliases(migrations)
                     }
                     remoteFullManifest = remoteManifest
+                    checkpoint?.bind(remoteManifest)
+                    bindCheckpointLocalArticle { id -> repository.getArticlesForSync(listOf(identityProjection.local(id)))
+                        .firstOrNull()?.let(identityProjection::outgoing) }
                     val supportsChunkedBodies = manifestResponse.optBoolean("supportsChunkedBodies", false) &&
                         manifestResponse.optInt("version") > LibrarySyncPayload.LEGACY_PROTOCOL_VERSION
+                    checkpointChunked = supportsChunkedBodies
                     val supportsMetadataOnlyArticles = LibrarySyncPayload.supportsMetadataOnlyArticles(manifestResponse)
                     reportProgress(onProgress, PhoneBluetoothSyncStage.TRANSFERRING, 28)
                     val deleteConflicts = if (legacySendArticles && legacyReceiveArticles && mode == LibrarySyncMode.MERGE) {
@@ -1359,10 +1435,17 @@ class PhoneBluetoothSyncManager(
                                 supportsFullMetadataOnlyArticles = activeBinding.capabilities.withDeclarations(manifestResponse).fullMetadataOnly
                             ).filterNot { identityProjection.local(it.articleId) in conflictPlan.suppressedRemoteArticleIds },
                             forcedRequests = conflictPlan.forcedRemoteRequests.map(identityProjection::request)
-                        )
+                        ).let { requests ->
+                            if (checkpoint == null) requests else try {
+                                requests.map(checkpoint::remaining)
+                            } catch (failure: java.io.IOException) {
+                                throw IllegalArgumentException("读取同步正文检查点失败", failure)
+                            }
+                        }
                         sentArticles = repository.getArticlesForSync(
                             (watchRequests.map { identityProjection.local(it.articleId) } + conflictPlan.outgoingArticleIds).filterNot {it in bookChapterIds}
                         ).map(identityProjection::outgoing)
+                        checkpoint?.allowResponseChanges(sentArticles.mapTo(mutableSetOf()) { it.articleId })
                         debugLog.appendEvent(
                             event = "sync.library.manifest.received",
                             sessionId = sessionId,
@@ -1424,6 +1507,7 @@ class PhoneBluetoothSyncManager(
                 syncSession = syncSession,
                 onProgress = onProgress,
                 sessionId = sessionId,
+                checkpointExchange = checkpointExchange,
                 applyResponse = { exchange ->
                     val window = syncWindow ?: error("同步窗口尚未准备")
                     reportProgress(onProgress, PhoneBluetoothSyncStage.VERIFYING, 90)
@@ -1448,13 +1532,16 @@ class PhoneBluetoothSyncManager(
                             receivedArticles = 0
                             0
                         } else if (chunkedResponse) {
-                            val chunked = LibrarySyncPayload.parseChunkedArticles(exchange.response).map(identityProjection::incoming)
-                            receivedArticles = chunked.size
-                            repository.mergeChunkedArticlesFromSync(
-                                chunked,
-                                conflictMergeResolutions,
-                                authoritative = mode == LibrarySyncMode.WATCH_TO_PHONE_REPLACE
-                            )
+                            val chunked = LibrarySyncPayload.parseChunkedArticles(exchange.response)
+                            if (checkpoint == null) {
+                                receivedArticles = chunked.size
+                                repository.mergeChunkedArticlesFromSync(chunked.map(identityProjection::incoming),
+                                    conflictMergeResolutions, authoritative = mode == LibrarySyncMode.WATCH_TO_PHONE_REPLACE)
+                            } else {
+                                chunked.forEach { check(applyCheckpoint(it)) { "同步正文尚未完整接收" } }
+                                receivedArticles = chunked.size
+                                checkpoint.merged - mergedBeforeAttempt
+                            }
                         } else {
                             val articles = LibrarySyncPayload.parseArticles(exchange.response).map(identityProjection::incoming)
                             receivedArticles = articles.size
@@ -1504,7 +1591,7 @@ class PhoneBluetoothSyncManager(
                     if (legacyCommit != null && mode == LibrarySyncMode.WATCH_TO_PHONE_REPLACE) {
                         repository.pruneUnreferencedArticleContent()
                     }
-                    onLocalApplied(merged + mergedSources)
+                    onLocalApplied((if (checkpoint != null && checkpointChunked) 0 else merged) + mergedSources)
                     reportProgress(onProgress, PhoneBluetoothSyncStage.VERIFYING, 96)
                 }
             )
@@ -1702,9 +1789,9 @@ class PhoneBluetoothSyncManager(
             legacyCommit?.rejectIfAffected(remoteDevice, legacyVersion, "notes", response)
             suspend fun applyNotes() {
                 for (note in incoming) {
-                    val previous = noteRepository.note(note.noteId)
-                    if (noteRepository.applyRemote(note, remoteDevice) is MarkdownMergeResult.Conflict) conflicts++
-                    if (previous != noteRepository.note(note.noteId)) applied++
+                    val changes = noteRepository.applyRemoteWithChanges(note, remoteDevice)
+                    if (changes.mergeResult is MarkdownMergeResult.Conflict) conflicts++
+                    applied += changes.changedNotes + changes.addedConflicts
                 }
             }
             if (legacyCommit == null) applyNotes() else legacyCommit.commit(::applyNotes)
@@ -1817,6 +1904,7 @@ class PhoneBluetoothSyncManager(
         requested: B2KindRoute,
         probe: JSONObject,
         device: PhoneBluetoothWatchDevice,
+        peerPackages: Map<String, JSONObject> = emptyMap(),
         progress: (String) -> Unit = {}
     ): Pair<B2KindRoute, B2KindSync?> {
         if (requested.isEmpty) return B2KindRoute.legacy to null
@@ -1831,7 +1919,7 @@ class PhoneBluetoothSyncManager(
             if (route.isEmpty) break
             val runtime = createBinaryRuntime(database, device, capabilities, route, progress)
             try {
-                runtime.prepare(probe, binaryAssetInventory(route))
+                runtime.prepare(probe, binaryAssetInventory(route), peerPackages)
                 return route to runtime
             } catch (failure: B2Exception) {
                 if (failure.code != "LIMIT_EXCEEDED" || route.hasBinaryBooks && !route.hasBinaryLibrary) throw failure
@@ -1981,9 +2069,19 @@ class PhoneBluetoothSyncManager(
                         val active = requireNotNull(session)
                         val transport = requireNotNull(active.transport)
                         val inventory = binaryAssetInventory(route)
+                        val response = requireNotNull(probe)
+                        val peerPackages = if (route.hasBinaryBooks && B2BookState.negotiated(response)) {
+                            try {
+                                runtime.exchangeBookState(active, parent, QUICK_EXCHANGE_TIMEOUT_MS)
+                            } catch (failure: TimeoutCancellationException) {
+                                currentCoroutineContext().ensureActive()
+                                throw LibraryTransportFailure(transport.generation,
+                                    java.net.SocketTimeoutException("B2 book state exchange timed out").apply { initCause(failure) })
+                            }
+                        } else emptyMap()
                         active.client.withBinaryTransport(active, transport.generation) { input, output, close ->
                             scope?.let { B2BodyHandoff.open(appContext.filesDir, it, onDeferredBluetoothBody) }.use { handoff ->
-                                runtime.run(input, output, requireNotNull(probe), inventory, handoff, close)
+                                runtime.run(input, output, response, inventory, handoff, peerPackages, close)
                             }
                         }
                     }
@@ -2628,11 +2726,12 @@ class PhoneBluetoothSyncManager(
         syncSession: PhoneSyncSession? = null,
         onProgress: (PhoneBluetoothSyncProgress) -> Unit,
         sessionId: String,
+        checkpointExchange: LibraryArticleCheckpointExchange? = null,
         applyResponse: suspend (BluetoothLibrarySyncExchange) -> Unit
     ): BluetoothLibrarySyncExchange {
         return try {
             withTimeout(timeoutMs) {
-                withContext(Dispatchers.IO) {
+                withContext(Dispatchers.IO + (checkpointExchange ?: kotlin.coroutines.EmptyCoroutineContext)) {
                     syncSession?.exchangeLibrary(
                         cursorRequest = cursorRequest,
                         buildManifestRequest = buildManifestRequest,

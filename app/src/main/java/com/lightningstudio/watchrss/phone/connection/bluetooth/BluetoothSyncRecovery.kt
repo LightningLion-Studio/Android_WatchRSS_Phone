@@ -59,6 +59,7 @@ internal class LibrarySyncRecovery(
     private val disconnectTimes = ArrayDeque<Long>()
     private val progress = LibraryReconnectProgress()
     private val confirmed = mutableSetOf<Pair<String, String>>()
+    val bodyTransferStats = LibraryBodyTransferStats()
 
     fun confirmedProgress() {
         progress.confirmed()

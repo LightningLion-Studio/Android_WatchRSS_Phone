@@ -195,6 +195,19 @@ class ImportedBookStore(private val db:PhoneCompanionDatabase,private val direct
             }
         }
     }
+    internal suspend fun visitCommittedBinaryPackages(limit: Int, work: () -> Unit, visit: (BookEntity) -> Unit) {
+        var after = ""
+        repeat(limit) {
+            work()
+            val row = dao.nextBinaryBook(after) ?: return
+            after = row.bookId
+            if (!JSONObject(row.stateJson).getBoolean("deleted")) {
+                val original = verifiedPackage(row, work)
+                if (original != null && dao.get(row.bookId) == row && original.isCurrent()) visit(row)
+            }
+        }
+    }
+
     internal suspend fun binaryReadingPage(id: String, after: Int) = dao.binaryReadingPage(id, after)
     internal suspend fun binaryState(id: String) = dao.get(id)?.stateJson?.let(::JSONObject)
     internal suspend fun binaryPackageRevision(id: String) = dao.get(id)?.packageRevision()

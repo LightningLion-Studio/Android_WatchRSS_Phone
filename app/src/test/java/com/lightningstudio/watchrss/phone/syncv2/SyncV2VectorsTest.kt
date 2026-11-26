@@ -61,7 +61,7 @@ class SyncV2VectorsTest {
         rejected {recover(scope=JSONObject(c.getJSONObject("scope").toString()).put("libraryEpoch","2"))}
         rejected {recover(p="repo-descriptor:sha256:"+"f".repeat(64))}
         rejected {recover(capsule=JSONObject())}
-        val tampered=JSONObject(v.getJSONObject("capsule").toString()).apply{put("ciphertext","A"+getString("ciphertext").drop(1))}
+        val tampered = SyncV2Fixtures.tamperRecoveryCapsule(v.getJSONObject("capsule"))
         rejected {recover(capsule=tampered)}
         val d=JSONObject(v.getJSONObject("descriptor").toString());d.getJSONObject("body").put("creatorPlatform","cli")
         rejected {recover(descriptor=d)}

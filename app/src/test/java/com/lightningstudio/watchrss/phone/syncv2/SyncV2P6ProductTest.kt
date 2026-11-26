@@ -510,7 +510,8 @@ class SyncV2P6ProductTest {
             }
         }}
         Server().use {server->Host(server,"creator").use{a->
-            a.note();a.sync();server.capsule=JSONObject(server.capsule!!.toString()).put("ciphertext","AAAA")
+            a.note();a.sync()
+            server.capsule = SyncV2Fixtures.tamperRecoveryCapsule(requireNotNull(server.capsule))
             Host(server,"receiver").use {b->
                 b.note("local retained")
                 assertNotNull(runCatching{b.sync()}.exceptionOrNull());assertEquals("local retained",b.text())

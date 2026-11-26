@@ -5,6 +5,7 @@ import kotlinx.coroutines.ensureActive
 import com.lightningstudio.watchrss.phone.data.book.*
 import com.lightningstudio.watchrss.phone.cloud.CloudSnapshotCodec
 import org.json.*
+import kotlinx.coroutines.currentCoroutineContext
 import java.io.File
 import java.io.RandomAccessFile
 import java.security.MessageDigest
@@ -47,6 +48,11 @@ internal class BookBluetoothSync(private val store:ImportedBookStore,private val
         require(peer.isNotBlank());deltaPeer=peer;appliedExchange=exchange;return this
     }
     private fun recordApplied(count:Int){if(count>0)onApplied(count)}
+    private fun metadataReceipt(value:JSONObject):String = BookSync.canonical(JSONObject().apply {
+        listOf("bookId","fingerprint","title","chapterCount","deletedChapters","deletionClock",
+            "deleted","deletedAt","updatedAt","sourceDeviceId").forEach { put(it,value.get(it)) }
+        put("sourceUrl",value.optString("sourceUrl"));put("kind",value.optString("kind"))
+    })
     private fun request(phase:String)=JSONObject().put("action","syncBooks").put("version",1).put("deviceId",deviceId).put("phase",phase)
     private suspend fun send(request:JSONObject):JSONObject=exchange(request).also {
         require(it.optBoolean("success")&&it.optString("action")=="syncBooks"&&it.optInt("version")==1) {"手表书籍同步失败"}
@@ -79,7 +85,13 @@ internal class BookBluetoothSync(private val store:ImportedBookStore,private val
         candidates.groupBy{it.getString("bookId")}.filterValues{it.size>1}.keys.forEach{reject(it,"book_manifest_invalid","manifest_duplicate_book_id")}
         val remote=candidates.filter{it.getString("bookId") !in rejected}
         var metadataApplied=0
+        val sentMetadata=local.associateBy { it.getString("bookId") }
         remote.forEach { state ->
+            sentMetadata[state.getString("bookId")]?.let { sent ->
+                val receipt = metadataReceipt(sent)
+                if (metadataReceipt(state) == receipt) currentCoroutineContext()[LibrarySyncRecovery]
+                    ?.confirmedProgress("sendBookMetadata", CloudSnapshotCodec.sha256(receipt.toByteArray()))
+            }
             try {val count=write { store.merge(state, checkOwner) };metadataApplied+=count;applied+=count;recordApplied(count)}
             catch(e:InvalidBookPackageException){reject(state.getString("bookId"),"book_manifest_invalid",e.reason)}
         }

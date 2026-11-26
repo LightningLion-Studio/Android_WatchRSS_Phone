@@ -44,6 +44,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import com.lightningstudio.watchrss.phone.ui.releaseSmokeError
 
 @Composable
 internal fun CloudSyncRoundNotice(usesSyncV2: Boolean, state: PhoneCloudSyncState) {
@@ -87,7 +88,17 @@ internal fun SyncV2Section(service: PhoneCloudSyncService, userId: String) {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text(notice.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = accent)
+                        Text(
+                            notice.title,
+                            modifier = if (notice.tone == SyncV2View.Tone.ERROR) {
+                                Modifier.releaseSmokeError()
+                            } else {
+                                Modifier
+                            },
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = accent
+                        )
                         Text(notice.detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     Spacer(Modifier.width(12.dp))

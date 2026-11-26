@@ -1,5 +1,6 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth.b2
 
+import com.lightningstudio.watchrss.phone.connection.bluetooth.B2BookState
 import androidx.room.Room
 import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.connection.bluetooth.B2BookBusiness
@@ -656,6 +657,22 @@ class B2BooksRoomTest {
             business.freeze(File(root, "source").apply { mkdirs() }, {}) { descriptor, _ -> exported += descriptor }
             assertEquals(setOf("bookState", "bookPackageSegment", "bookPackageCommit"), exported.map { it.s("kind") }.toSet())
             B2BookManifest.validatePlan(exported, B2Wire.BOOK_MAX_BYTES)
+            val proof = B2BookState.read(business.committedPackages()).getValue(id)
+            assertEquals(hashes.sha256, proof.s("packageSha256"))
+            assertEquals(hashes.size, proof.n("packageBytes"))
+            val kinds = mutableSetOf<String>()
+            business.freeze(File(root, "second").apply { mkdirs() }, {},
+                omitPackage = { B2BookState.same(it, proof) }) { descriptor, _ -> kinds += descriptor.s("kind") }
+            assertEquals(setOf(B2Wire.BOOK_STATE), kinds)
+            assertNull(B2BookState.read(JSONArray().put(copy(proof).put("d1Complete", false)))[id])
+            assertFalse(B2BookState.same(proof, copy(proof).put("packageBytes", hashes.size - 1)))
+            assertFalse(B2BookState.same(proof, copy(proof).put("packageSha256", "f".repeat(64))))
+            val committed = requireNotNull(books.packageFile(id))
+            val bytes = committed.readBytes()
+            bytes[bytes.lastIndex - 1] = (bytes[bytes.lastIndex - 1].toInt() xor 1).toByte()
+            committed.writeBytes(bytes)
+            assertTrue(B2BookState.read(business.committedPackages()).isEmpty())
+
         } finally {
             db.close()
             root.deleteRecursively()

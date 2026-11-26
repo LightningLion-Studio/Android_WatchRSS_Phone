@@ -1,5 +1,6 @@
 package com.lightningstudio.watchrss.phone.connection.bluetooth.b2
 
+import com.lightningstudio.watchrss.phone.connection.bluetooth.B2BookState
 import com.lightningstudio.watchrss.phone.connection.bluetooth.B2KindRoute
 import com.lightningstudio.watchrss.phone.connection.bluetooth.BluetoothSyncProtocol
 import com.lightningstudio.watchrss.phone.connection.bluetooth.LibrarySyncPayload
@@ -36,6 +37,11 @@ class B2RoutingFlowTest {
         assertEquals("[1]", guarded.getJSONArray("supportedGuardedLibraryVersions").toString())
         assertEquals("[2]", guarded.getJSONArray("supportedLibraryBinaryVersions").toString())
         assertFalse(guarded.has("supportedLibraryResumeVersions"))
+        assertFalse(B2Routing.probe(request, false).has(B2BookState.VERSION))
+        assertTrue(B2BookState.negotiated(B2Routing.probe(request, true)))
+        assertTrue(B2BookState.negotiated(guarded))
+        val ordinaryProofReply = JSONObject(base.toString()).put(B2BookState.VERSION, 1)
+        assertEquals(B2Routing.Peer.B2, B2Routing.classify(ordinaryProofReply, ready))
         assertTrue(B2KindRoute.select(base, true, true, guarded = true).isEmpty)
         for (raw in listOf("null", "\"1\"", "true", "1.0", "1e0", "0", "2", "1,\"guardedLibraryVersion\":1")) {
             val bytes = (base.toString().dropLast(1) + ",\"guardedLibraryVersion\":$raw}").toByteArray()

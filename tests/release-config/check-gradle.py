@@ -65,6 +65,9 @@ def main():
             "app/build.gradle.kts",
         ):
             shutil.copyfile(PROJECT / relative, project / relative)
+        shutil.copytree(PROJECT / "buildSrc", project / "buildSrc", ignore=shutil.ignore_patterns("build", ".gradle"))
+        (project / "config").mkdir()
+        shutil.copyfile(PROJECT / "config/app_access_public_key.pem", project / "config/app_access_public_key.pem")
         (project / "gradle").mkdir()
         shutil.copyfile(PROJECT / "gradle/libs.versions.toml", project / "gradle/libs.versions.toml")
 

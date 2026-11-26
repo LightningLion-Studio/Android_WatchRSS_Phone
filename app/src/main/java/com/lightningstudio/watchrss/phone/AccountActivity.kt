@@ -134,6 +134,7 @@ import kotlinx.coroutines.withContext
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import com.lightningstudio.watchrss.phone.ui.releaseSmokeError
 
 class AccountActivity : ComponentActivity() {
     private var screenStartedAt: Long = 0L
@@ -2387,6 +2388,7 @@ private fun AccountFeedback(message: String?, error: String?) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(
                 text = it,
+                modifier = Modifier.releaseSmokeError(),
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodyMedium
             )

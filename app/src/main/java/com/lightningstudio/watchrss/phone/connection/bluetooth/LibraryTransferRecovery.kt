@@ -21,16 +21,13 @@ internal class LibraryTransferRecovery(
     private val progress = mutableSetOf<String>()
     private var generation = -1L
     private var lastDisconnect = -1L
-    private var readyAfterDisconnect = false
-    private var progressSinceReady = false
-    private var noProgress = 0
+    private val reconnectProgress = LibraryReconnectProgress()
     var onDisconnect: () -> Unit = {}
 
     @Synchronized
     fun confirmedProgress(identity: String) {
         if (progress.add(identity)) {
-            progressSinceReady = true
-            noProgress = 0
+            reconnectProgress.confirmed()
         }
     }
 
@@ -50,10 +47,7 @@ internal class LibraryTransferRecovery(
         }
         disconnectTimes.addLast(at)
         if (disconnectTimes.size >= 3) throw LibraryDisconnectLimit(failure)
-        if (readyAfterDisconnect && !progressSinceReady && ++noProgress >= 3) {
-            throw IOException("连续 3 次重连后同步未推进", failure)
-        }
-        readyAfterDisconnect = false
+        reconnectProgress.disconnected(failure)
         return true
     }
 
@@ -64,8 +58,7 @@ internal class LibraryTransferRecovery(
                 openReady()
                 currentCoroutineContext().ensureActive()
                 if (reconnecting) synchronized(this) {
-                    readyAfterDisconnect = true
-                    progressSinceReady = false
+                    reconnectProgress.ready()
                 }
                 return
             } catch (failure: IOException) {
@@ -92,5 +85,14 @@ internal class LibraryTransferRecovery(
                 if (disconnected(failure)) open(openReady, reconnecting = true)
             }
         }
+    }
+}
+
+internal class LibraryProgressHold {
+    private var floor: Int? = null
+    fun reset() { floor = null }
+    fun percent(reconnecting: Boolean, next: Int, visible: Int?): Int {
+        if (reconnecting) floor = maxOf(floor ?: 0, visible ?: next)
+        return maxOf(next, floor ?: 0)
     }
 }

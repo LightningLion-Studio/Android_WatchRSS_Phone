@@ -94,11 +94,15 @@ interface NoteDao {
 
     @androidx.room.Transaction
     suspend fun commitRemoteNote(noteId: String, expected: NoteEntity?, replacement: NoteEntity?,
-        conflict: NoteConflictEntity?, receipt: NoteRemoteReceiptEntity): Boolean {
-        if (expected != null && hasRemoteReceipt(receipt.snapshotHash)) return true
-        if (!commitNote(noteId, expected, replacement, conflict)) return false
+        conflict: NoteConflictEntity?, receipt: NoteRemoteReceiptEntity): NoteRemoteWrites? {
+        if (expected != null && hasRemoteReceipt(receipt.snapshotHash)) return NoteRemoteWrites()
+        val newConflict = conflict != null && conflictsFor(noteId).none { sameConflictContent(it, conflict) }
+        if (!commitNote(noteId, expected, replacement, conflict)) return null
         insertRemoteReceipt(receipt)
-        return true
+        return NoteRemoteWrites(
+            changedNotes = if (replacement != null && replacement != expected) 1 else 0,
+            addedConflicts = if (newConflict) 1 else 0
+        )
     }
 
     @androidx.room.Transaction

@@ -15,10 +15,12 @@ import com.lightningstudio.watchrss.phone.viewmodel.MainViewModel
 @Composable
 internal fun WatchSyncBindingHost(viewModel: MainViewModel) {
     val context = LocalContext.current
+    val container = (context.applicationContext as PhoneCompanionApplication).container
+    val cloudEntryAllowed = com.lightningstudio.watchrss.phone.cloud.rememberCloudSyncEntryAllowed(container)
     val prompt by viewModel.watchSyncBindingPrompt.collectAsStateWithLifecycle()
     LaunchedEffect(viewModel) {
         viewModel.watchSyncBindingEvents.collect { event ->
-            if (event == WatchSyncBindingEvent.OpenWatchPairing) context.startActivity(WatchPairingActivity.createIntent(context))
+            if (event == WatchSyncBindingEvent.OpenWatchPairing && container.cloudSyncService.canOpenCloudSync()) context.startActivity(WatchPairingActivity.createIntent(context))
         }
     }
     when (prompt) {
@@ -29,14 +31,14 @@ internal fun WatchSyncBindingHost(viewModel: MainViewModel) {
                 openPhoneSyncReauthentication(context, viewModel::dismissWatchSyncBindingPrompt)
             }
         )
-        WatchSyncBindingEvent.RequireWatchBinding -> AlertDialog(
+        WatchSyncBindingEvent.RequireWatchBinding -> if (cloudEntryAllowed) AlertDialog(
             onDismissRequest = viewModel::dismissWatchSyncBindingPrompt,
             title = { Text("先绑定手表") },
             text = { Text("这块手表还没有登录腕上RSS账号。点「扫码绑定」后手表会自动弹出二维码；如果没有弹出，请在手表上进入「我的 → 连接手机 → 扫码绑定」。绑定后手表会登录当前账号并开启云同步。") },
             confirmButton = { TextButton(onClick = viewModel::openWatchPairing) { Text("扫码绑定") } },
             dismissButton = { TextButton(onClick = viewModel::dismissWatchSyncBindingPrompt) { Text("取消") } }
         )
-        WatchSyncBindingEvent.WatchAccountMismatch -> AlertDialog(
+        WatchSyncBindingEvent.WatchAccountMismatch -> if (cloudEntryAllowed) AlertDialog(
             onDismissRequest = viewModel::dismissWatchSyncBindingPrompt,
             title = { Text("手表登录了其他账号") },
             text = { Text("请先在手表「我的 → 云同步」底部退出原账号，再回到这里扫码绑定。") },

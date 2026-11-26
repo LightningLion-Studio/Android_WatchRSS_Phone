@@ -3,6 +3,7 @@ package com.lightningstudio.watchrss.phone.syncv2
 import android.content.Context
 import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.cloud.CloudKeyManager
+import com.lightningstudio.watchrss.phone.cloud.CloudHeadReply
 import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2CommitWindow
 import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Exception
 import com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase
@@ -80,6 +81,34 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
     }
     fun observeBootstrap(syncV2: JSONObject?) {
         if (syncV2 == null && announcement != null) release()
+    }
+
+    internal fun hasHeadRuntimeFor(userId: String): Boolean = runtime?.account?.userId == userId
+
+    internal fun headOwner(userId: String): List<String>? {
+        val live = runtime?.takeIf { it.account.userId == userId } ?: return null
+        val owner = live.account.owner()
+        return try {
+            if (current()?.owner() == owner) owner + live.identity.repoId else null
+        } catch (_: IllegalStateException) {
+            null
+        }
+    }
+
+    internal suspend fun probeHead(owner: List<String>, etag: String?): CloudHeadReply? {
+        if (!mutex.tryLock()) return null
+        return try {
+            val live = runtime ?: return null
+            if (headOwner(live.account.userId) != owner) return null
+            live.client.accountHead(etag)
+        } finally {
+            mutex.unlock()
+        }
+    }
+
+    internal fun hasPendingHeadPublication(owner: List<String>): Boolean {
+        val live = runtime ?: return false
+        return headOwner(live.account.userId) == owner && live.projection.hasPendingHeadPublication()
     }
 
     internal fun captureBluetoothWindow(owner: String): B2CommitWindow? {

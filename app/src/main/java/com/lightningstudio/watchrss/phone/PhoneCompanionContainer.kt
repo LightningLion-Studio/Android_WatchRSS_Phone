@@ -15,6 +15,7 @@ import com.lightningstudio.watchrss.phone.account.LicenseDeviceIdentity
 import com.lightningstudio.watchrss.phone.account.AppAccessCoordinator
 import com.lightningstudio.watchrss.phone.connection.bluetooth.PhoneBluetoothSyncManager
 import com.lightningstudio.watchrss.phone.cloud.PhoneCloudChangeScheduler
+import com.lightningstudio.watchrss.phone.cloud.PhoneCloudHeadPoller
 import com.lightningstudio.watchrss.phone.cloud.PhoneCloudClient
 import com.lightningstudio.watchrss.phone.cloud.PhoneCloudSyncService
 import com.lightningstudio.watchrss.phone.data.backup.WatchRssBackupService
@@ -48,6 +49,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 
 class PhoneCompanionContainer(context: Context) {
     val syncDiagnostics by lazy {com.lightningstudio.watchrss.phone.diagnostics.SyncDiagnostics.open(context.applicationContext)}
@@ -356,6 +359,7 @@ class PhoneCompanionContainer(context: Context) {
             // Approval endpoints bind this ID to the possession-verified app license.
             deviceId = licenseDeviceIdentity.deviceId,
             legacyDeviceId = deviceIdentity.deviceId,
+            cloudEntryEnabled = { clientConfig.cloudSyncEntryAllowed(alreadyEnabled = false) },
             client = PhoneCloudClient(
                 accountEnvironment,
                 deviceAccessToken = { appAccessCoordinator.deviceAccessToken },
@@ -386,11 +390,25 @@ class PhoneCompanionContainer(context: Context) {
         )
     }
 
+    internal val cloudHeadPoller = PhoneCloudHeadPoller(android.os.SystemClock::elapsedRealtime)
+    internal val cloudHeadConfig by lazy { clientConfig.changes.map { cloudHeadPollingEnabled() } }
+
+    internal fun cloudHeadPollingEnabled(): Boolean = clientConfig.decide(
+        clientConfig.currentSnapshot(),
+        com.lightningstudio.watchrss.phone.features.FeatureRegistry.syncHeadPoll,
+        eligible = true
+    ).enabled
+
+    private fun fastCloudChangesEnabled(): Boolean =
+        cloudHeadPollingEnabled() && cloudHeadPoller.available.value
+
     private val cloudChangeScheduler: PhoneCloudChangeScheduler by lazy {
         PhoneCloudChangeScheduler(
             database = database,
             cloudSyncService = cloudSyncService,
-            scope = appScope
+            scope = appScope,
+            fastMode = cloudHeadConfig.combine(cloudHeadPoller.available) { enabled, available -> enabled && available },
+            fastEnabled = ::fastCloudChangesEnabled
         )
     }
 
@@ -468,10 +486,8 @@ class PhoneCompanionContainer(context: Context) {
             manager.onDeferredBluetoothBody = cloudSyncService::deferBluetoothBodyRetry
             if (BuildConfig.SYNC_V2) {
                 manager.bookRollbackWindow = cloudSyncService::syncV2BookRollbackWindow
-                if (BuildConfig.B2_ENABLED) {
-                    manager.binaryWindowKey = cloudSyncService::syncV2BinaryWindowKey
-                    manager.captureBinaryWindow = cloudSyncService::captureSyncV2BluetoothWindow
-                }
+                manager.binaryWindowKey = cloudSyncService::syncV2BinaryWindowKey
+                manager.captureBinaryWindow = cloudSyncService::captureSyncV2BluetoothWindow
             }
             if(BuildConfig.SYNC_V2 || BuildConfig.SYNC_OBJECTS_V2_LOCAL_PROJECTION)manager.recordLegacyProjection={peer,version,cursor,payload ->
                 if(BuildConfig.SYNC_V2)cloudSyncService.captureSyncV2Legacy(peer,version,cursor,payload)

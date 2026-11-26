@@ -146,6 +146,18 @@ internal class SyncV2Projection(
         val parent = bodies.firstOrNull { SyncV2Codec.oid("commit", it) == rollback.optString("accountParent") } ?: return true
         return parent.optString("treeRoot") != head.getString("treeRoot")
     }
+    // Fresh business revisions belong to the edit debounce. Only retry already observed work here.
+    internal fun hasPendingHeadPublication(): Boolean = guarded {
+        requireWorkerContext()
+        ensureActive()
+        val state = readState()
+        val stamp = SyncV2BusinessWitness.peek(db)
+        stamp != null && state.body.optString("businessStamp") == stamp.encoded() &&
+            state.body.isNull("pendingChoice") &&
+            (state.revision != state.body.optString("acknowledgedLocalRevision", "0") ||
+                !state.body.isNull("pendingPublish"))
+    }
+
     fun state():State=guarded { stateLocal() }
     private fun stateLocal(): State {
         requireWorkerContext();ensureActive()

@@ -101,7 +101,8 @@ class PhoneCloudSyncService(
     private val migrationWorkerTrust:CloudWorkerTrust = CloudWorkerTrust.bundled,
     private val migrationPreferences:CloudMigrationPreferences = CloudMigrationPreferences(context),
     private val syncV2Database:(()->com.lightningstudio.watchrss.phone.data.db.PhoneCompanionDatabase)?=null,
-    private val syncV2RoundTimeoutMillis: Long = SYNC_V2_ROUND_TIMEOUT_MS
+    private val syncV2RoundTimeoutMillis: Long = SYNC_V2_ROUND_TIMEOUT_MS,
+    private val cloudEntryEnabled: () -> Boolean = { true }
 ) {
     private val appContext = context.applicationContext
     private val traceLog = com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog(context.applicationContext)
@@ -164,7 +165,7 @@ class PhoneCloudSyncService(
     val pairingChanges: kotlinx.coroutines.flow.Flow<Unit> = merge(keyManager.changes.map { Unit }, pairingEpochState.map { Unit })
     fun pairingEpoch(): String? = accountRepository.session.value?.let { client.knownEpoch(it) }
     val pairingBackendBaseUrl: String get() = client.backendBaseUrl
-    private var trustedBootstrap: CloudBootstrap? = null
+    @Volatile private var trustedBootstrap: CloudBootstrap? = null
     private val syncV2Product by lazy {
         SyncV2PhoneProduct(appContext,{requireNotNull(syncV2Database).invoke()},keyManager,
             current={
@@ -347,7 +348,11 @@ class PhoneCloudSyncService(
 
     private val approvalsDelegate = lazy { CloudApprovalV2(client, deviceId, ::requireSession,
         { keyManager.devicePublicKeySpki(it.userId, deviceId) },
-        { session -> val bootstrap = validatedBootstrap(session); registerCurrentDevice(session, bootstrap.libraryEpoch) },
+        { session ->
+            requireCloudSyncEntry()
+            val bootstrap = validatedBootstrap(session)
+            registerCurrentDevice(session, bootstrap.libraryEpoch)
+        },
         ::approvalPayload, ::acceptApprovalPayload) }
     val approvals: CloudApprovalV2 get() = approvalsDelegate.value
     private val _needsReapproval = MutableStateFlow<List<RegisteredCloudDevice>>(emptyList())
@@ -630,6 +635,7 @@ class PhoneCloudSyncService(
         } finally { keys.values.forEach { it.fill(0) } }
     }
     private suspend fun acceptApprovalPayload(session: PhoneAccountSession, payload: String) {
+        requireCloudSyncEntry()
         val bootstrap = client.bootstrap(session); val data = JSONObject(payload); val envelopes = data.getJSONArray("envelopes")
         val keys = linkedMapOf<Int, ByteArray>()
         try {
@@ -656,6 +662,7 @@ class PhoneCloudSyncService(
 
     /** No new key is generated here: the caller must explicitly open/recover cloud keys first. */
     suspend fun prepareWatchPairingCloud(expectedUserId: String): PairingCloudPreparation {
+        requireCloudSyncEntry()
         val session = requireSession(); check(session.userId == expectedUserId) { "账号已切换，请重新配对" }; val bootstrap = validatedBootstrap(session)
         if (!keyManager.hasAccountKey(session.userId) || keyManager.keyVersions(session.userId).toSet() != bootstrap.keyCommitments.map { it.keyVersion }.toSet()) return PairingCloudPreparation.NeedsKey(bootstrap.libraryEpoch,
             bootstrap.keyCommitments.isNotEmpty() || bootstrap.keyEnvelopes.isNotEmpty() || bootstrap.legacyKeyVersions.isNotEmpty())
@@ -666,6 +673,7 @@ class PhoneCloudSyncService(
     }
 
     suspend fun grantWatchPairingCloud(qr: WatchPairingQr, preparedSpki: String, expectedEpoch: String, expectedUserId: String): PairingCloudGrant {
+        requireCloudSyncEntry()
         val session = requireSession(); check(session.userId == expectedUserId) { "账号已切换，请重新配对" }; checkCloudEpoch(session, expectedEpoch)
         val bootstrap = validatedBootstrap(session); checkCloudEpoch(session, expectedEpoch)
         val keys = localKeys(session)
@@ -754,6 +762,14 @@ class PhoneCloudSyncService(
         // persists after the server confirms its recovery envelope; every sync still validates
         // the epoch and commitments before using any key.
         accountRepository.session.value?.let { keyManager.hasAccountKey(it.userId) } == true
+
+    internal val localKeyChanges get() = keyManager.changes
+
+    internal fun canOpenCloudSync(): Boolean = hasLocalAccountKey() || cloudEntryEnabled()
+
+    private fun requireCloudSyncEntry() {
+        check(canOpenCloudSync()) { "此手机暂未开放云同步入口" }
+    }
 
     fun rssInventoryMode(sourceUrl: String): CloudRssInventoryMode =
         rssInventoryPreferences.mode(sourceUrl)
@@ -977,6 +993,7 @@ class PhoneCloudSyncService(
     }
 
     suspend fun prepareFirstDevice(): RecoveryKeySetup = approvalMutex.withLock {
+        requireCloudSyncEntry()
         val session = requireSession(); val bootstrap = client.bootstrap(session)
         requireCloudFirstActivationAllowed(bootstrap)
         keyManager.createRecoverySetup(session.userId, keyVersion = bootstrap.keyVersionFloor + 1).also {
@@ -992,6 +1009,7 @@ class PhoneCloudSyncService(
         settings.requireUploadOwner(session.userId)
     }
     suspend fun activateFirstDevice(setup: RecoveryKeySetup, confirmedWords: List<String>) = approvalMutex.withLock {
+        requireCloudSyncEntry()
         val session = requireSession(); val bootstrap = client.bootstrap(session); checkSetup(session, setup, confirmedWords)
         val key = setup.pendingKey; val version = setup.envelope.keyVersion
         if (bootstrap.keyCommitments.isNotEmpty()) {
@@ -1011,6 +1029,7 @@ class PhoneCloudSyncService(
         key.fill(0); pendingSetup = null
     }
     suspend fun recoverWithWords(words: List<String>) = approvalMutex.withLock {
+        requireCloudSyncEntry()
         val session = requireSession(); val bootstrap = client.bootstrap(session)
         val recovery = bootstrap.keyEnvelopes.filter { it.recipientType == "recovery" }.map { it.envelope }
         if (bootstrap.keyCommitments.isEmpty()) {
@@ -1044,6 +1063,7 @@ class PhoneCloudSyncService(
         ) { ACCOUNT_CHANGED }
     }
     suspend fun requestDeviceApproval(expectedEpoch: String? = null, expectedUserId: String? = null): CloudBootstrap {
+        requireCloudSyncEntry()
         val session = requireSession(expectedUserId); val bootstrap = client.bootstrap(session)
         checkCloudEpoch(session, expectedEpoch ?: bootstrap.libraryEpoch)
         registerCurrentDevice(session, expectedEpoch ?: bootstrap.libraryEpoch)
@@ -1051,6 +1071,7 @@ class PhoneCloudSyncService(
         return bootstrap
     }
     suspend fun acceptDeviceApproval(expectedUserId: String? = null): Boolean {
+        requireCloudSyncEntry()
         val session = requireSession(expectedUserId); validatedBootstrap(session)
         return keyManager.hasAccountKey(session.userId)
     }
@@ -1295,6 +1316,71 @@ class PhoneCloudSyncService(
         return refreshed
     }
 
+    internal fun hasCloudHeadRuntime(): Boolean = usesSyncV2 &&
+        accountRepository.session.value?.let { syncV2Product.hasHeadRuntimeFor(it.userId) } == true
+
+    internal suspend fun pollCloudHead(poller: PhoneCloudHeadPoller, enabled: () -> Boolean): Boolean =
+        withContext(Dispatchers.IO + operationGeneration.asContextElement(accountGeneration)) {
+            syncMutex.run(false, { false }) {
+                val session = accountRepository.session.value ?: return@run false
+                if (!enabled() || !session.isUsableForAuthentication || accountRepository.cloudSessionChanging ||
+                    !usesSyncV2 || paused.value || bluetoothFence.active || libraryOwnerConflict(session.userId)
+                ) return@run false
+                val bootstrap = trustedBootstrap?.takeIf { it.member.readable } ?: return@run false
+                val approved = bootstrap.devices.any {
+                    it.deviceId == deviceId && it.revokedAt == null && deviceAuthenticated(session, bootstrap, it)
+                }
+                if (!approved) return@run false
+                val owner = syncV2Product.headOwner(session.userId) ?: return@run false
+                fun eligible() = enabled() && !paused.value && !bluetoothFence.active &&
+                    syncV2Product.headOwner(session.userId) == owner
+                poller.check(
+                    owner = owner,
+                    probe = { etag ->
+                        try {
+                            withContext(kotlinx.coroutines.CoroutineName("Cloud head request")) probe@{
+                                val job = currentCoroutineContext()[kotlinx.coroutines.Job]!!
+                                if (!bluetoothFence.startHeadProbe(job)) return@probe null
+                                try {
+                                    if (eligible()) syncV2Product.probeHead(owner, etag) else null
+                                } finally {
+                                    bluetoothFence.finishHeadProbe(job)
+                                }
+                            }
+                        } catch (_: CancellationException) {
+                            currentCoroutineContext().ensureActive()
+                            null
+                        } catch (_: IllegalStateException) {
+                            // The live runtime may have been released while the request was in flight.
+                            null
+                        }
+                    },
+                    sync = {
+                        if (!eligible()) false else try {
+                            traceSync("sync-request")
+                            syncUnderLock(manual = false, restoreCurrent = false, expectedUserId = session.userId).completed
+                        } catch (_: Exception) {
+                            currentCoroutineContext().ensureActive()
+                            false
+                        }
+                    },
+                    pendingLocal = {
+                        eligible() && try {
+                            syncV2Product.hasPendingHeadPublication(owner)
+                        } catch (_: IllegalStateException) {
+                            false
+                        }
+                    }
+                )
+            }
+        }
+
+    internal suspend fun syncDebouncedChanges(fast: Boolean): PhoneCloudSyncResult {
+        if (fast) bluetoothFence.cancelHeadProbe()
+        return syncNow(manual = false, restoreCurrent = false, expectedUserId = accountRepository.session.value?.userId,
+            waitForLock = fast)
+    }
+
     suspend fun syncNow(
         manual: Boolean = false,
         expectedUserId: String? = accountRepository.session.value?.userId
@@ -1305,103 +1391,110 @@ class PhoneCloudSyncService(
     ): PhoneCloudSyncResult = syncNow(manual = true, restoreCurrent = true, expectedUserId = expectedUserId)
 
     private suspend fun syncNow(
-        manual: Boolean, restoreCurrent: Boolean, expectedUserId: String?
+        manual: Boolean, restoreCurrent: Boolean, expectedUserId: String?, waitForLock: Boolean = false
     ): PhoneCloudSyncResult = withContext(Dispatchers.IO + operationGeneration.asContextElement(accountGeneration)) {
         check(!restoreCurrent || usesSyncV2) { "当前云端资料库恢复不可用" }
         if(!manual && bluetoothFence.active)return@withContext PhoneCloudSyncResult(0,0,0,false,0)
         traceSync("sync-request")
-        syncMutex.run(manual, { PhoneCloudSyncResult(0, 0, 0, false, 0) }) {
-            val automaticJob=if(manual)null else kotlin.coroutines.coroutineContext[kotlinx.coroutines.Job]
-            if(!manual && bluetoothFence.active)return@run PhoneCloudSyncResult(0,0,0,false,0)
-            // The confirmation belongs to this account even when a different round held the lock.
-            val session = requireSession(expectedUserId)
-            bluetoothFence.started(manual,automaticJob)
-            var retryingTransfer = false
-            var legacyAttemptScope: String? = null
-            try {
-                if(!manual && bluetoothFence.active)return@run PhoneCloudSyncResult(0,0,0,false,0)
-                val roundResult=retryDiscardedCloudTransfer(rebuild = { failure ->
-                    checkApprovalOwner(session)
-                    if (failure.status == 409) clearContentSyncState(session)
-                    // A current-generation expired plan keeps authenticated immutable bytes for
-                    // reuse only. The new reserve's missingObjects are the sole upload authority.
-                    retryingTransfer = true
-                    traceSync("transfer-rebuild:server-discarded")
-                    update(CloudSyncPhase.CHECKING,"云端内容已清理，正在从本机重建同步")
-                    client.bootstrap(session)
-                }, attempt = {
-                    checkApprovalOwner(session)
-                    val empty = PhoneCloudSyncResult(0, 0, 0, false, 0)
-                    val product = if (usesSyncV2) syncV2Product else null
-                    if (product != null && libraryOwnerConflict(session.userId)) {
-                        update(CloudSyncPhase.BLOCKED, "本机资料属于其他账号，请先清空本机资料或明确确认合并",
-                            errorCode = "library_owner_conflict")
-                        return@retryDiscardedCloudTransfer empty
-                    }
-                    if (paused.value) {
-                        update(CloudSyncPhase.PAUSED, "已暂停同步")
-                        return@retryDiscardedCloudTransfer empty
-                    }
-                    require(networkGate.isConnected()) { "当前没有可用网络" }
-                    val scope = client.scopeId(session)
-                    if (product == null && legacyFenceScope == scope) {
-                        update(CloudSyncPhase.IDLE, "旧同步通道已关闭，本机资料已保留")
-                        return@retryDiscardedCloudTransfer empty
-                    }
-
-                    val admission = if (product == null) settings.admitCycle() else null
-                    update(CloudSyncPhase.CHECKING, "正在检查云端")
-                    if (product != null) {
-                        syncV2Pass(session, product, manual, restoreCurrent)
-                        empty
-                    } else {
-                        val bootstrap = validatedBootstrap(session)
-                        legacyAttemptScope = scope
-                        client.inContentGeneration(session) { syncOnePass(manual, retryingTransfer, bootstrap, admission) }
-                    }
-                })
-                checkApprovalOwner(session)
-                roundResult.copy(outcome = _state.value)
-            } catch (error: Exception) {
-                if (operationGeneration.get() != accountGeneration || accountRepository.cloudSessionChanging ||
-                    accountRepository.session.value?.userId != session.userId) throw error
-                if (error is CancellationException) {
-                    update(if (paused.value) CloudSyncPhase.PAUSED else CloudSyncPhase.IDLE, "等待继续同步")
-                    throw error
-                }
-                val transientRebuildFailure = retryingTransfer && error is java.io.IOException &&
-                    (error !is CloudHttpException || error.status in setOf(408,429,500,502,503,504))
-                if (error is CloudDeviceSessionRefreshException) {
-                    // App-login/session renewal is not an authenticated cloud-key revocation.
-                    // Keep the epoch, keys and applied cursors; the backend still rejects access.
-                    traceSync("device-session-refresh:key-preserved")
-                    update(CloudSyncPhase.NEEDS_RECOVERY, error.message.orEmpty())
-                } else if (transientRebuildFailure || error is CloudHttpException && (discardedCloudTransfer(error) || cloudErrorCode(error) == "cloud_storage_cleanup_pending")) {
-                    update(CloudSyncPhase.IDLE, "云端内容正在重建，已排队重试；本机资料已保留")
-                    PhoneCloudSyncWorker.scheduleFollowUp(appContext)
-                } else if (error is CloudDeviceAuthorizationException && _state.value.phase != CloudSyncPhase.NEEDS_RECOVERY) {
-                    invalidateEpoch(session,"device_session_authorization")
-                    update(CloudSyncPhase.NEEDS_RECOVERY, "设备身份需要重新验证")
-                } else if (_state.value.phase !in setOf(CloudSyncPhase.NEEDS_RECOVERY,CloudSyncPhase.ERROR)) {
-                    val code = when {
-                        error is SyncV2CloudError -> error.code
-                        error is java.net.SocketTimeoutException ||
-                            (error is java.io.InterruptedIOException && error.message == "timeout") -> "sync_timeout"
-                        error.message == "device_alias_recovery_required" -> "device_alias_recovery_required"
-                        else -> null
-                    }
-                    update(CloudSyncPhase.ERROR, code?.let(SyncV2View::errorText) ?: error.message ?: "云同步失败",
-                        errorCode = code)
-                }
-                if (isLegacySyncFence(error)) legacyAttemptScope?.let { legacyFenceScope = it }
-                if(serverRequiresCloudClientUpgrade(error)) {
-                    settings.formatUpgradeRequiredVersion=com.lightningstudio.watchrss.phone.BuildConfig.VERSION_CODE
-                    _formatStatus.value=_formatStatus.value.copy(upgradeRequired=true)
-                    updateSyncState {it.copy(phase=CloudSyncPhase.ERROR,message="请升级到最新版本以继续同步",errorCode="cloud_format_upgrade_required")}
-                }
-                throw error
-            } finally { bluetoothFence.finished(automaticJob) }
+        syncMutex.run(manual || waitForLock, { PhoneCloudSyncResult(0, 0, 0, false, 0) }) {
+            syncUnderLock(manual, restoreCurrent, expectedUserId)
         }
+    }
+
+    private suspend fun syncUnderLock(
+        manual: Boolean, restoreCurrent: Boolean, expectedUserId: String?
+    ): PhoneCloudSyncResult {
+        val automaticJob=if(manual)null else kotlin.coroutines.coroutineContext[kotlinx.coroutines.Job]
+        if(!manual && bluetoothFence.active)return PhoneCloudSyncResult(0,0,0,false,0)
+        if (!canOpenCloudSync()) return PhoneCloudSyncResult(0, 0, 0, false, 0)
+        // The confirmation belongs to this account even when a different round held the lock.
+        val session = requireSession(expectedUserId)
+        bluetoothFence.started(manual,automaticJob)
+        var retryingTransfer = false
+        var legacyAttemptScope: String? = null
+        return try {
+            if(!manual && bluetoothFence.active)return PhoneCloudSyncResult(0,0,0,false,0)
+            val roundResult=retryDiscardedCloudTransfer(rebuild = { failure ->
+                checkApprovalOwner(session)
+                if (failure.status == 409) clearContentSyncState(session)
+                // A current-generation expired plan keeps authenticated immutable bytes for
+                // reuse only. The new reserve's missingObjects are the sole upload authority.
+                retryingTransfer = true
+                traceSync("transfer-rebuild:server-discarded")
+                update(CloudSyncPhase.CHECKING,"云端内容已清理，正在从本机重建同步")
+                client.bootstrap(session)
+            }, attempt = {
+                checkApprovalOwner(session)
+                val empty = PhoneCloudSyncResult(0, 0, 0, false, 0)
+                val product = if (usesSyncV2) syncV2Product else null
+                if (product != null && libraryOwnerConflict(session.userId)) {
+                    update(CloudSyncPhase.BLOCKED, "本机资料属于其他账号，请先清空本机资料或明确确认合并",
+                        errorCode = "library_owner_conflict")
+                    return@retryDiscardedCloudTransfer empty
+                }
+                if (paused.value) {
+                    update(CloudSyncPhase.PAUSED, "已暂停同步")
+                    return@retryDiscardedCloudTransfer empty
+                }
+                require(networkGate.isConnected()) { "当前没有可用网络" }
+                val scope = client.scopeId(session)
+                if (product == null && legacyFenceScope == scope) {
+                    update(CloudSyncPhase.IDLE, "旧同步通道已关闭，本机资料已保留")
+                    return@retryDiscardedCloudTransfer empty
+                }
+
+                val admission = if (product == null) settings.admitCycle() else null
+                update(CloudSyncPhase.CHECKING, "正在检查云端")
+                if (product != null) {
+                    syncV2Pass(session, product, manual, restoreCurrent)
+                    empty
+                } else {
+                    val bootstrap = validatedBootstrap(session)
+                    legacyAttemptScope = scope
+                    client.inContentGeneration(session) { syncOnePass(manual, retryingTransfer, bootstrap, admission) }
+                }
+            })
+            checkApprovalOwner(session)
+            roundResult.copy(outcome = _state.value)
+        } catch (error: Exception) {
+            if (operationGeneration.get() != accountGeneration || accountRepository.cloudSessionChanging ||
+                accountRepository.session.value?.userId != session.userId) throw error
+            if (error is CancellationException) {
+                update(if (paused.value) CloudSyncPhase.PAUSED else CloudSyncPhase.IDLE, "等待继续同步")
+                throw error
+            }
+            val transientRebuildFailure = retryingTransfer && error is java.io.IOException &&
+                (error !is CloudHttpException || error.status in setOf(408,429,500,502,503,504))
+            if (error is CloudDeviceSessionRefreshException) {
+                // App-login/session renewal is not an authenticated cloud-key revocation.
+                // Keep the epoch, keys and applied cursors; the backend still rejects access.
+                traceSync("device-session-refresh:key-preserved")
+                update(CloudSyncPhase.NEEDS_RECOVERY, error.message.orEmpty())
+            } else if (transientRebuildFailure || error is CloudHttpException && (discardedCloudTransfer(error) || cloudErrorCode(error) == "cloud_storage_cleanup_pending")) {
+                update(CloudSyncPhase.IDLE, "云端内容正在重建，已排队重试；本机资料已保留")
+                PhoneCloudSyncWorker.scheduleFollowUp(appContext)
+            } else if (error is CloudDeviceAuthorizationException && _state.value.phase != CloudSyncPhase.NEEDS_RECOVERY) {
+                invalidateEpoch(session,"device_session_authorization")
+                update(CloudSyncPhase.NEEDS_RECOVERY, "设备身份需要重新验证")
+            } else if (_state.value.phase !in setOf(CloudSyncPhase.NEEDS_RECOVERY,CloudSyncPhase.ERROR)) {
+                val code = when {
+                    error is SyncV2CloudError -> error.code
+                    error is java.net.SocketTimeoutException ||
+                        (error is java.io.InterruptedIOException && error.message == "timeout") -> "sync_timeout"
+                    error.message == "device_alias_recovery_required" -> "device_alias_recovery_required"
+                    else -> null
+                }
+                update(CloudSyncPhase.ERROR, code?.let(SyncV2View::errorText) ?: error.message ?: "云同步失败",
+                    errorCode = code)
+            }
+            if (isLegacySyncFence(error)) legacyAttemptScope?.let { legacyFenceScope = it }
+            if(serverRequiresCloudClientUpgrade(error)) {
+                settings.formatUpgradeRequiredVersion=com.lightningstudio.watchrss.phone.BuildConfig.VERSION_CODE
+                _formatStatus.value=_formatStatus.value.copy(upgradeRequired=true)
+                updateSyncState {it.copy(phase=CloudSyncPhase.ERROR,message="请升级到最新版本以继续同步",errorCode="cloud_format_upgrade_required")}
+            }
+            throw error
+        } finally { bluetoothFence.finished(automaticJob) }
     }
 
     private suspend fun syncV2Pass(

@@ -20,6 +20,7 @@ import kotlinx.coroutines.launch
 fun DashboardCloudSyncBanner() {
     val context = LocalContext.current
     val container = (context.applicationContext as? PhoneCompanionApplication)?.container ?: return
+    if (!rememberCloudSyncEntryAllowed(container)) return
     val service = container.cloudSyncService
     val session by container.accountRepository.session.collectAsState()
     val userId = session?.userId

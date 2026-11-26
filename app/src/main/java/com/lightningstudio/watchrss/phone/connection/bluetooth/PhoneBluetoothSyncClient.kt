@@ -440,8 +440,7 @@ internal class LibraryB2ProbeOffer(val enabled: Boolean) : AbstractCoroutineCont
 
 internal suspend fun b2Probe(request: JSONObject): JSONObject =
     B2Routing.probe(
-        request, com.lightningstudio.watchrss.phone.BuildConfig.B2_ENABLED &&
-            !com.lightningstudio.watchrss.phone.BuildConfig.SYNC_V2 &&
+        request, !BuildConfig.SYNC_V2 &&
             currentCoroutineContext()[LibraryB2ProbeOffer]?.enabled == true
     )
 
@@ -483,7 +482,6 @@ class PhoneBluetoothSyncClient(
      * This connection is closed after B2; it never returns to the legacy exchange loop. */
     internal suspend fun <T> withBinaryTransport(session: PhoneSyncSession, generation: Long,
         block: suspend (InputStream, OutputStream, () -> Unit) -> T): T = withContext(Dispatchers.IO) {
-        check(com.lightningstudio.watchrss.phone.BuildConfig.B2_ENABLED)
         connectionMutex.withLock {
             val transport = session.transport
                 ?: throw LibraryTransportFailure(generation, EOFException("B2 connection closed"))
@@ -874,7 +872,7 @@ class PhoneBluetoothSyncClient(
                 val wireRequest = session.requestForExchange(request)
                 writeFrameLogged(transport.outputStream, sessionId, "sessionRequest", wireRequest)
                 val response = readFrameLogged(transport.inputStream, sessionId, "sessionResponse")
-                val guardedBook = BuildConfig.B2_ENABLED && transport.guardedLibrarySelected &&
+                val guardedBook = transport.guardedLibrarySelected &&
                     action == "syncBooks" && transport.legacyResponseAdmission != null
                 if (guardedBook) transport.legacyResponseAdmission?.invoke()
                 val ackFailure = writeResponseAck(

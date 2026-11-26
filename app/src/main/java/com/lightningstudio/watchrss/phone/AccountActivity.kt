@@ -288,11 +288,20 @@ internal fun AccountScreen(
     val accessCoordinator = accessCoordinatorOverride ?: (context.applicationContext as PhoneCompanionApplication).container.appAccessCoordinator
     val appAccessState by accessCoordinator.state.collectAsState()
     val cloudSyncState by cloudSyncService.state.collectAsState()
+    val cloudEntryAllowed = (context.applicationContext as? PhoneCompanionApplication)?.container?.let {
+        com.lightningstudio.watchrss.phone.cloud.rememberCloudSyncEntryAllowed(it)
+    } ?: cloudSyncService.canOpenCloudSync()
     val coroutineScope = rememberCoroutineScope()
     var page by rememberSaveable(session?.userId) {
-        mutableStateOf(if (initialSection == AccountSection.CLOUD_SYNC && session != null) AccountPage.CLOUD_SYNC else AccountPage.ROOT)
+        mutableStateOf(if (initialSection == AccountSection.CLOUD_SYNC && session != null && cloudEntryAllowed) AccountPage.CLOUD_SYNC else AccountPage.ROOT)
     }
     var showCloudInventory by remember(session?.userId) { mutableStateOf(false) }
+    LaunchedEffect(cloudEntryAllowed) {
+        if (!cloudEntryAllowed) {
+            page = AccountPage.ROOT
+            showCloudInventory = false
+        }
+    }
     val purchaseLauncher = rememberWeChatPurchaseLauncher()
     val sectionRequester = remember { BringIntoViewRequester() }
     var sectionReady by remember(session?.userId, initialSection) { mutableStateOf(false) }
@@ -1077,7 +1086,7 @@ internal fun AccountScreen(
                 enabled = !busy && !totpLoading,
                 modifier = Modifier.fillMaxWidth()
             ) { Text("添加 TOTP 验证器") }
-            CloudSyncEntryCard(
+            if (cloudEntryAllowed) CloudSyncEntryCard(
                 summary = cloudSyncMenuSummary(
                     member = cloudSyncState.member,
                     hasLocalKey = cloudSyncService.hasLocalAccountKey()
@@ -1086,7 +1095,7 @@ internal fun AccountScreen(
                 onClick = onCloudSyncClick
             )
             val pairingContext = LocalContext.current
-            Button(
+            if (cloudEntryAllowed) Button(
                 onClick = { pairingContext.startActivity(WatchPairingActivity.createIntent(pairingContext)) },
                 enabled = !busy && appAccessState is AppAccessState.Authorized,
                 modifier = Modifier.fillMaxWidth()
@@ -1160,6 +1169,7 @@ internal fun AccountScreen(
     var cloudPaneMessage by remember(session?.userId) { mutableStateOf<String?>(null) }
 
     fun openCloudSync() {
+        if (!cloudSyncService.canOpenCloudSync()) return
         if (page == AccountPage.CLOUD_SYNC || paneTransition != null) return
         purchaseLauncher?.cancelPending()
         page = AccountPage.CLOUD_SYNC
@@ -2113,7 +2123,7 @@ internal fun AccountScreen(
                     }
                 }
                 accountControls(::openCloudSync)
-                if (page == AccountPage.ROOT && !accountRepository.hasUsableSession) {
+                if (cloudEntryAllowed && page == AccountPage.ROOT && !accountRepository.hasUsableSession) {
                     CloudMembershipPurchaseButton(enabled = !busy && purchaseLauncher?.busy == false) {
                         membershipPurchase.open(AccountPage.ROOT)
                     }
@@ -2137,6 +2147,9 @@ internal fun AccountScreen(
                     backEnabled = paneTransition == null
                 ) {
                     val activeSession = session
+                    if (!cloudEntryAllowed) {
+                        return@AccountPageScaffold
+                    }
                     if (activeSession == null || reauthenticationOwner != null || !accountRepository.hasUsableSession) {
                         Text("登录后可管理云同步。")
                         if (!showCloudInventory) {

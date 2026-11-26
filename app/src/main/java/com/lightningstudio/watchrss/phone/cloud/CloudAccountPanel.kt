@@ -232,9 +232,9 @@ fun CloudAccountPanel(
                     onClick = { showHistory = !showHistory; if (showHistory) refresh() },
                     enabled = !busy,
                     modifier = Modifier.fillMaxWidth()
-                ) { Text(if (showHistory) "收起历史快照" else "历史快照 · 恢复与删除") }
+                ) { Text(if (showHistory) "收起历史快照" else "恢复历史快照") }
                 if (showHistory) {
-                    Text("历史快照", fontWeight = FontWeight.Medium)
+                    Text("恢复历史快照", fontWeight = FontWeight.Medium)
                     Text(
                         "覆盖恢复会先创建本地安全备份。大小包含共享数据，删除后实际释放空间可能更少。",
                         style = MaterialTheme.typography.bodySmall,

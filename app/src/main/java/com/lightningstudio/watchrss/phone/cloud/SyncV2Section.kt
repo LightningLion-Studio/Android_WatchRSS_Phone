@@ -329,10 +329,10 @@ private fun HistoryDialog(port: SyncV2PhoneUiPort, state: SyncV2UiState, onClose
     }
     LaunchedEffect(Unit) { busy = true; load(null) }
 
-    SubViewDialog("历史版本", onClose, error) {
-        Text("每个版本保留 7 天。回到某个版本后，各设备都会同步到该版本。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    SubViewDialog("恢复历史快照", onClose, error) {
+        Text("每个快照保留 7 天。恢复快照后，各设备都会同步到该快照。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         notice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
-        if (loaded && rows.isEmpty()) Text("暂无历史版本。", style = MaterialTheme.typography.bodySmall)
+        if (loaded && rows.isEmpty()) Text("暂无可恢复的历史快照。", style = MaterialTheme.typography.bodySmall)
         rows.forEach { row ->
             Row(Modifier.fillMaxWidth().clickable(enabled = !busy) { target = row }.padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {

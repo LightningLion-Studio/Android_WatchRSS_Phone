@@ -14,6 +14,10 @@ import android.os.Process
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ProcessLifecycleOwner
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.decode.ImageDecoderDecoder
@@ -31,6 +35,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -40,6 +46,7 @@ class PhoneCompanionApplication : Application(), ImageLoaderFactory {
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var lastForegroundSyncAt = 0L
     private var startedActivities = 0
+    private val hasStartedActivity = MutableStateFlow(false)
     @Volatile private var resumedActivity: Activity? = null
     private var resumedAtMillis = 0L
     private val recoveryClipboard = lazy {
@@ -137,7 +144,8 @@ class PhoneCompanionApplication : Application(), ImageLoaderFactory {
                         stopWatchBaseStation()
                         if (activity !is MainActivity && activity !is AccountActivity &&
                             activity !is DataManagementActivity && activity !is ContactDeveloperActivity &&
-                            activity !is SupportActivity
+                            activity !is SupportActivity &&
+                            activity !is com.lightningstudio.watchrss.phone.rollout.FeatureDebugActivity
                         ) {
                             activity.startActivity(
                                 Intent(activity, MainActivity::class.java)
@@ -147,6 +155,9 @@ class PhoneCompanionApplication : Application(), ImageLoaderFactory {
                         }
                     }
                 }
+                if (container.cloudHeadPoller.available.value && container.cloudHeadPollingEnabled() &&
+                    container.cloudSyncService.hasCloudHeadRuntime()
+                ) return
                 val now = SystemClock.elapsedRealtime()
                 if (now - lastForegroundSyncAt < FOREGROUND_SYNC_THROTTLE_MS) return
                 lastForegroundSyncAt = now
@@ -159,7 +170,10 @@ class PhoneCompanionApplication : Application(), ImageLoaderFactory {
 
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
             override fun onActivityStarted(activity: Activity) {
-                if (startedActivities++ == 0) refreshClientConfig()
+                if (startedActivities++ == 0) {
+                    hasStartedActivity.value = true
+                    refreshClientConfig()
+                }
             }
             override fun onActivityPaused(activity: Activity) {
                 if (resumedActivity === activity) cloudApprovalPrompts.pause()
@@ -171,7 +185,10 @@ class PhoneCompanionApplication : Application(), ImageLoaderFactory {
                 }
                 if (resumedActivity === activity) resumedActivity = null
             }
-            override fun onActivityStopped(activity: Activity) { startedActivities-- }
+            override fun onActivityStopped(activity: Activity) {
+                startedActivities--
+                if (startedActivities == 0) hasStartedActivity.value = false
+            }
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
             override fun onActivityDestroyed(activity: Activity) = Unit
         })
@@ -203,6 +220,13 @@ class PhoneCompanionApplication : Application(), ImageLoaderFactory {
         if (!PhonePrivacyConsentStore(this).hasRequiredConsent()) return
         if (!consentServicesStarted.compareAndSet(false, true)) return
         container.oppoPushCoordinator.init()
+        startForegroundCloudPolling()
+        val lifecycle = ProcessLifecycleOwner.get().lifecycle
+        ProcessLifecycleOwner.get().lifecycleScope.launch {
+            lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                container.clientConfig.refreshWhileForeground(hasStartedActivity)
+            }
+        }
         appScope.launch {
             accountInitialization.await()
             container.oppoPushCoordinator.ensurePushState()
@@ -214,6 +238,27 @@ class PhoneCompanionApplication : Application(), ImageLoaderFactory {
                 container.appAccessCoordinator.isAuthorized
             ) {
                 runCatching { container.cloudSyncService.syncNow() }
+            }
+        }
+    }
+
+    private fun startForegroundCloudPolling() {
+        val processLifecycle = ProcessLifecycleOwner.get()
+        processLifecycle.lifecycleScope.launch {
+            accountInitialization.await()
+            val access = container.appAccessCoordinator
+            val account = container.accountRepository
+            val consent = PhonePrivacyConsentStore(this@PhoneCompanionApplication)
+            fun allowed() = hasStartedActivity.value && consent.hasRequiredConsent() && access.isAuthorized &&
+                account.hasUsableSession && container.cloudHeadPollingEnabled()
+            // ProcessLifecycleOwner delays ON_STOP across activity transitions.
+            val enabled = combine(hasStartedActivity, container.cloudHeadConfig, access.state, account.session) { _, _, _, _ ->
+                allowed()
+            }
+            container.clientConfig.awaitSessionConfig(waitForRefresh = false)
+            container.cloudHeadPoller.run(processLifecycle.lifecycle, enabled) {
+                if (!allowed()) return@run false
+                container.cloudSyncService.pollCloudHead(container.cloudHeadPoller, ::allowed)
             }
         }
     }

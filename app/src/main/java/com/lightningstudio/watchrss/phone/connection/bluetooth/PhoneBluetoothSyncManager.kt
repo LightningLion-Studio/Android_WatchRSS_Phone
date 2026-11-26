@@ -688,7 +688,7 @@ class PhoneBluetoothSyncManager(
         // only be verified after connecting and never changes the rollout snapshot.
         telemetry?.stage = BtSyncStage.ACCOUNT
         requirePhoneLogin()
-        val binaryMerge = BuildConfig.B2_ENABLED && mode == LibrarySyncMode.MERGE
+        val binaryMerge = mode == LibrarySyncMode.MERGE && (sessionRollout?.enabled == true || b2BuildEligible())
         val guardedBinary = binaryMerge && BuildConfig.SYNC_V2
         val guardedScope = if (guardedBinary) currentBinaryScope() else null
         val binaryAssetsReady = binaryMerge && b2Database() != null &&
@@ -1787,7 +1787,7 @@ class PhoneBluetoothSyncManager(
     }
 
     private fun captureLegacyCommit(session: PhoneSyncSession): LegacyCommit? {
-        if (!BuildConfig.B2_ENABLED) return null
+        if (!BuildConfig.B2_ENABLED && session.transport?.guardedLibrarySelected != true) return null
         val transport = session.transport ?: return null
         if (!transport.guardedLibrarySelected) return null
         val capture = captureBinaryWindow ?: return null
@@ -1881,8 +1881,15 @@ class PhoneBluetoothSyncManager(
             })
     }
 
+    private suspend fun b2BuildEligible(): Boolean =
+        BuildConfig.B2_ENABLED || withTimeoutOrNull(SESSION_CONFIG_WAIT_MS) {
+            val repository = rolloutRepository.await() ?: return@withTimeoutOrNull false
+            repository.awaitSessionConfig(waitForRefresh = false)
+            repository.b2BuildEligible()
+        } == true
+
     private suspend fun binaryLibraryAvailable(mode: LibrarySyncMode): Boolean =
-        BuildConfig.B2_ENABLED && mode == LibrarySyncMode.MERGE && b2Database() != null &&
+        mode == LibrarySyncMode.MERGE && b2BuildEligible() && b2Database() != null &&
             (!BuildConfig.SYNC_V2 || currentBinaryScope() != null && b2AccountScope().isNotBlank())
 
     private suspend fun currentBinaryScope(): String? = withContext(Dispatchers.IO) { binaryWindowKey() }

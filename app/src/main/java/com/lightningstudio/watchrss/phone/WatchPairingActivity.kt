@@ -71,6 +71,11 @@ class WatchPairingActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             WatchRssPhoneTheme {
+                val container = (application as PhoneCompanionApplication).container
+                if (!com.lightningstudio.watchrss.phone.cloud.rememberCloudSyncEntryAllowed(container)) {
+                    androidx.compose.runtime.LaunchedEffect(Unit) { finish() }
+                    return@WatchRssPhoneTheme
+                }
                 WatchPairingScreen(
                     viewModel = viewModel,
                     onClose = { viewModel.cancel(); finish() },

@@ -21,6 +21,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
@@ -80,6 +89,66 @@ class ClientConfigRepositoryTest {
             val afterRestart = repository(server)
             assertEquals(downloaded, afterRestart.snapshotForSession())
             assertEquals(0, afterRestart.snapshotForSession().rollout(feature).percent)
+        }
+    }
+
+    @Test
+    fun syncHeadPollDefaultsOnAndCanBeDisabledRemotely() = runBlocking {
+        MockWebServer().use { server ->
+            val repo = repository(server)
+            val head = FeatureRegistry.syncHeadPoll
+            val oldConfig = JSONObject(config(1, 20, null))
+            server.enqueue(MockResponse().setBody(oldConfig.toString()))
+            assertTrue(repo.decide(repo.snapshotForSession(), head, eligible = true).enabled)
+
+            advanceClock(601_000)
+            oldConfig.put("configVersion", 2)
+            oldConfig.getJSONObject("features").put("sync_head_poll_v1", JSONObject()
+                .put("percent", 100).put("salt", "head-poll")
+                .put("minAppVersionCode", 0).put("maxAppVersionCode", JSONObject.NULL)
+                .put("forced", "off"))
+            server.enqueue(MockResponse().setBody(oldConfig.toString()))
+            val disabled = repo.snapshotForSession()
+            assertEquals(2L, disabled.version)
+            assertFalse(repo.decide(disabled, head, eligible = true).enabled)
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun syncHeadPollRefreshesStaleConfigDuringTheSameForegroundSession() = runTest {
+        MockWebServer().use { server ->
+            val config = JSONObject(config(1, 20, null))
+            server.enqueue(MockResponse().setBody(config.toString()))
+            val repo = repository(server)
+            assertEquals(1L, withContext(Dispatchers.IO) { repo.snapshotForSession().version })
+            val active = MutableStateFlow(true)
+            val job = backgroundScope.launch { repo.refreshWhileForeground(active) }
+            runCurrent()
+            assertEquals(1, server.requestCount)
+
+            advanceClock(601_000)
+            config.put("configVersion", 2)
+            config.getJSONObject("features").put("sync_head_poll_v1", JSONObject()
+                .put("percent", 0).put("salt", "head-poll")
+                .put("minAppVersionCode", 0).put("maxAppVersionCode", JSONObject.NULL)
+                .put("forced", JSONObject.NULL))
+            server.enqueue(MockResponse().setBody(config.toString()))
+            advanceTimeBy(60_000)
+            runCurrent()
+            withContext(Dispatchers.IO) {
+                withTimeout(5_000) {
+                    repo.changes.first { repo.currentSnapshot().version == 2L }
+                }
+            }
+            assertFalse(repo.decide(repo.currentSnapshot(), FeatureRegistry.syncHeadPoll, eligible = true).enabled)
+
+            active.value = false
+            runCurrent()
+            advanceClock(601_000)
+            advanceTimeBy(600_000)
+            assertEquals(2, server.requestCount)
+            job.cancel()
         }
     }
 
@@ -370,7 +439,7 @@ class ClientConfigRepositoryTest {
     }
 
     @Test
-    fun explicitOverridesSurviveExpirationAndZeroStillShutsDown() = runBlocking {
+    fun localOverrideTakesPrecedenceAndZeroShutsDownWhenFollowingCloud() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody(config(3, 1, "on")))
             val repo = repository(server)
@@ -380,14 +449,14 @@ class ClientConfigRepositoryTest {
             server.enqueue(MockResponse().setResponseCode(503))
             assertEquals(B2RolloutDecision(true, B2Cohort.FORCED_ON, 3, configStale = true),
                 repo.decideB2(true, offer))
-            if (BuildConfig.DEBUG) {
-                repo.setDebugOverride(feature, FeatureOverride.OFF)
-                server.enqueue(MockResponse().setResponseCode(503))
-                assertEquals(B2RolloutDecision(false, B2Cohort.DEBUG, 3, configStale = true),
-                    repo.decideB2(true, offer))
-                repo.setDebugOverride(feature, FeatureOverride.ON)
-            }
+            repo.setDebugOverride(feature, FeatureOverride.OFF)
+            server.enqueue(MockResponse().setResponseCode(503))
+            assertEquals(B2RolloutDecision(false, B2Cohort.DEBUG, 3, configStale = true),
+                repo.decideB2(true, offer))
+            repo.setDebugOverride(feature, FeatureOverride.ON)
             server.enqueue(MockResponse().setBody(config(4, 0, "on")))
+            assertEquals(B2RolloutDecision(true, B2Cohort.DEBUG, 4), repo.decideB2(true, offer))
+            repo.setDebugOverride(feature, null)
             assertEquals(B2RolloutDecision(false, B2Cohort.OFF, 4), repo.decideB2(true, offer))
         }
     }
@@ -405,9 +474,66 @@ class ClientConfigRepositoryTest {
         MockWebServer().use { server ->
             val repo = repository(server)
             repo.setDebugOverride(feature, FeatureOverride.ON)
-            assertEquals(if (BuildConfig.DEBUG) FeatureOverride.ON else null, repo.loadDebugOverride(feature))
+            assertEquals(FeatureOverride.ON, repo.loadDebugOverride(feature))
             repo.setDebugOverride(feature, null)
             assertNull(repo.loadDebugOverride(feature))
+        }
+    }
+
+    @Test
+    fun cloudEntryUsesDefaultThenLiveConfigAndAlwaysKeepsExistingUsers() = runBlocking {
+        MockWebServer().use { server ->
+            val feature = FeatureRegistry.cloudSyncEntry
+            val repo = repository(server)
+            server.enqueue(MockResponse().setResponseCode(503))
+            repo.refreshNow()
+            assertEquals("未取到，使用包内默认", repo.debugSnapshot().configStatus)
+            assertFalse(repo.cloudSyncEntryAllowed(alreadyEnabled = false))
+            assertTrue(repo.cloudSyncEntryAllowed(alreadyEnabled = true))
+
+            val salt = feature.defaultSalt
+            val bucket = com.lightningstudio.watchrss.phone.features.FeatureRolloutPolicy.bucket(salt, installId)
+            fun remote(version: Int, percent: Int) = MockResponse().setBody(
+                """{"configVersion":$version,"ttlSeconds":300,"features":{
+                    "${feature.key}":{"percent":$percent,"salt":"$salt","minAppVersionCode":0}
+                }}"""
+            )
+            server.enqueue(remote(1, bucket))
+            repo.refreshNow()
+            assertEquals(false, repo.debugSnapshot().features.single { it.key == feature.key }.bucketHit)
+            assertFalse(repo.cloudSyncEntryAllowed(alreadyEnabled = false))
+
+            server.enqueue(remote(2, bucket + 1))
+            repo.refreshNow() // Must bypass the still-fresh first response.
+            val debug = repo.debugSnapshot()
+            assertEquals(2L, debug.config.version)
+            assertEquals(clock, debug.fetchedAt)
+            assertEquals(true, debug.features.single { it.key == feature.key }.bucketHit)
+            assertEquals("已启用（云控）", debug.features.single { it.key == feature.key }.status())
+            assertTrue(repo.cloudSyncEntryAllowed(alreadyEnabled = false))
+
+            repo.setDebugOverride(feature, FeatureOverride.OFF)
+            val overridden = repo.debugSnapshot().features.single { it.key == feature.key }
+            assertEquals(true, overridden.remoteEnabled)
+            assertEquals("未启用（强制）", overridden.status())
+            assertFalse(repo.cloudSyncEntryAllowed(alreadyEnabled = false))
+            assertTrue(repo.cloudSyncEntryAllowed(alreadyEnabled = true))
+
+            server.enqueue(MockResponse().setResponseCode(503))
+            repo.refreshNow()
+            assertEquals("未取到新配置，使用上次成功的缓存", repo.debugSnapshot().configStatus)
+            val restarted = repository(server)
+            assertEquals(FeatureOverride.OFF, restarted.loadDebugOverride(feature))
+            restarted.clearDebugOverrides()
+            assertTrue(restarted.cloudSyncEntryAllowed(alreadyEnabled = false))
+
+            server.enqueue(remote(3, 0))
+            restarted.refreshNow()
+            assertFalse(restarted.cloudSyncEntryAllowed(alreadyEnabled = false))
+            restarted.setDebugOverride(feature, FeatureOverride.ON)
+            assertTrue(restarted.cloudSyncEntryAllowed(alreadyEnabled = false))
+            restarted.setDebugOverride(FeatureRegistry.b2, FeatureOverride.ON)
+            assertTrue(restarted.b2BuildEligible())
         }
     }
 

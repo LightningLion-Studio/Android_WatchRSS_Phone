@@ -19,6 +19,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -62,7 +68,7 @@ internal class ClientConfigRepository(
         ?.addQueryParameter("appVersionCode", BuildConfig.VERSION_CODE.toString())
         ?.addQueryParameter("installId", installId)
         ?.build()
-    private data class Cached(val config: ClientConfig, val elapsedAnchor: Long?) {
+    private data class Cached(val config: ClientConfig, val elapsedAnchor: Long?, val fetchedAt: Long?) {
         private fun age() = elapsedAnchor?.let { SystemClock.elapsedRealtime() - it }
 
         fun isFresh() = age()?.let { it in 0 until config.ttlSeconds * 1000L } == true
@@ -72,8 +78,10 @@ internal class ClientConfigRepository(
     private data class Storage(val prefs: SharedPreferences, val boot: Int)
     private data class CacheSnapshot(val loaded: Boolean, val cached: Cached? = null)
 
-    @Volatile private var cache = CacheSnapshot(loaded = false)
-    @Volatile private var debugOverrides = emptyMap<String, FeatureOverride>()
+    private val cache = MutableStateFlow(CacheSnapshot(loaded = false))
+    private val debugOverrides = MutableStateFlow(emptyMap<String, FeatureOverride>())
+    private val refreshFailed = MutableStateFlow(false)
+    val changes: Flow<Any?> = combine(cache, debugOverrides, refreshFailed, ::Triple)
     private var inFlight: Deferred<Unit>? = null
     private val storage = scope.async(Dispatchers.IO) {
         val app = context.applicationContext
@@ -83,44 +91,59 @@ internal class ClientConfigRepository(
         val boot = runCatching {
             Settings.Global.getInt(app.contentResolver, Settings.Global.BOOT_COUNT, -1)
         }.getOrDefault(-1)
-        debugOverrides = FeatureRegistry.entries.filter(::supportsDebugOverride).mapNotNull { feature ->
+        debugOverrides.value = FeatureRegistry.entries.mapNotNull { feature ->
             val wire = prefs.getString("debug_override_${feature.key}", null)
             FeatureOverride.entries.firstOrNull { it.wire == wire }?.let { feature.key to it }
         }.toMap()
-        cache = CacheSnapshot(loaded = true, cached = readCache(prefs, boot))
+        cache.value = CacheSnapshot(loaded = true, cached = readCache(prefs, boot))
         Storage(prefs, boot)
     }
-
-    private fun supportsDebugOverride(feature: RegisteredFeature) = BuildConfig.DEBUG || feature.releaseDebugOverride
 
     suspend fun loadDebugOverride(feature: RegisteredFeature): FeatureOverride? {
         storage.await()
         return debugOverride(feature)
     }
 
-    private fun debugOverride(feature: RegisteredFeature) =
-        debugOverrides[feature.key].takeIf { supportsDebugOverride(feature) }
+    fun debugOverride(feature: RegisteredFeature) =
+        debugOverrides.value[feature.key]
 
     suspend fun setDebugOverride(feature: RegisteredFeature, value: FeatureOverride?) {
-        if (!supportsDebugOverride(feature)) return
         val prefs = storage.await().prefs
         withContext(Dispatchers.IO) {
             synchronized(prefs) {
                 prefs.edit { putString("debug_override_${feature.key}", value?.wire) }
-                debugOverrides = if (value == null) debugOverrides - feature.key
-                    else debugOverrides + (feature.key to value)
+                debugOverrides.value = if (value == null) debugOverrides.value - feature.key
+                    else debugOverrides.value + (feature.key to value)
             }
         }
     }
 
+    suspend fun clearDebugOverrides() {
+        val prefs = storage.await().prefs
+        withContext(Dispatchers.IO) {
+            synchronized(prefs) {
+                prefs.edit { FeatureRegistry.entries.forEach { remove("debug_override_${it.key}") } }
+                debugOverrides.value = emptyMap()
+            }
+        }
+    }
+
+    fun refreshIfStale(): Deferred<Unit>? = startRefresh(force = false)
+
+    suspend fun refreshNow() {
+        val refresh = startRefresh(force = true)
+        if (refresh == null) refreshFailed.value = true else refresh.await()
+    }
+
     @Synchronized
-    fun refreshIfStale(): Deferred<Unit>? {
+    private fun startRefresh(force: Boolean): Deferred<Unit>? {
         val url = endpoint ?: return null
-        if (cache.cached?.isFresh() == true) return null
+        if (!force && cache.value.cached?.isFresh() == true) return null
         inFlight?.takeIf { !it.isCompleted }?.let { return it }
         return scope.async(Dispatchers.IO) {
             val (prefs, boot) = storage.await()
-            if (cache.cached?.isFresh() == true) return@async
+            if (!force && cache.value.cached?.isFresh() == true) return@async
+            var accepted = false
             try {
                 val request = Request.Builder().url(url).withWatchRssAppVersionHeader().build()
                 http.newCall(request).execute().use { response ->
@@ -129,7 +152,7 @@ internal class ClientConfigRepository(
                     if (body.length > 16_384) return@use
                     val json = JSONObject(body)
                     val config = parseClientConfig(json)
-                    if (config.version < (cache.cached?.config?.version ?: 0)) return@use
+                    if (config.version < (cache.value.cached?.config?.version ?: 0)) return@use
                     val fetchedAt = now()
                     val elapsed = SystemClock.elapsedRealtime()
                     prefs.edit {
@@ -139,7 +162,8 @@ internal class ClientConfigRepository(
                         putLong(FETCHED_ELAPSED, elapsed)
                         putInt(FETCHED_BOOT, boot)
                     }
-                    cache = CacheSnapshot(loaded = true, cached = Cached(config, elapsed))
+                    cache.value = CacheSnapshot(loaded = true, cached = Cached(config, elapsed, fetchedAt))
+                    accepted = true
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -148,8 +172,18 @@ internal class ClientConfigRepository(
             } catch (_: JSONException) {
                 // An invalid response cannot replace a valid snapshot.
             }
-            Unit
+            refreshFailed.value = !accepted
         }.also { inFlight = it }
+    }
+
+    suspend fun refreshWhileForeground(foreground: Flow<Boolean>) {
+        foreground.distinctUntilChanged().collectLatest { active ->
+            if (!active) return@collectLatest
+            while (true) {
+                refreshIfStale()?.await()
+                delay(60_000)
+            }
+        }
     }
 
     // The caller owns the deadline so it can include repository initialization.
@@ -164,7 +198,7 @@ internal class ClientConfigRepository(
     }
 
     fun currentSnapshot(): ClientConfig {
-        val observed = cache
+        val observed = cache.value
         val snapshot = observed.cached ?: return ClientConfig(cacheLoaded = observed.loaded)
         return if (snapshot.isExpired()) snapshot.config.copy(stale = true) else snapshot.config
     }
@@ -173,6 +207,30 @@ internal class ClientConfigRepository(
         FeatureRolloutPolicy.decide(config.rollout(feature), installId, eligible,
             BuildConfig.VERSION_CODE, debugOverride(feature), stale = config.stale && feature.evaluateAt == EvaluateAt.SESSION)
 
+    fun cloudSyncEntryAllowed(alreadyEnabled: Boolean): Boolean =
+        alreadyEnabled || decide(currentSnapshot(), FeatureRegistry.cloudSyncEntry, eligible = true).enabled
+
+    fun b2BuildEligible() = BuildConfig.B2_ENABLED || debugOverride(FeatureRegistry.b2) == FeatureOverride.ON
+
+    fun debugSnapshot(): ClientConfigDebugSnapshot {
+        val snapshot = currentSnapshot()
+        return ClientConfigDebugSnapshot(
+            config = snapshot,
+            fetchedAt = cache.value.cached?.fetchedAt,
+            refreshFailed = refreshFailed.value,
+            features = FeatureRegistry.entries.map { feature ->
+                val remote = snapshot.features[feature.key]
+                val override = debugOverride(feature)
+                val effective = decide(snapshot, feature, eligible = feature != FeatureRegistry.b2 || b2BuildEligible())
+                ClientFeatureDebugState(
+                    feature.key, remote, remote?.let { FeatureRolloutPolicy.bucket(it.salt, installId) < it.percent },
+                    remote?.let { FeatureRolloutPolicy.decide(it, installId, true, BuildConfig.VERSION_CODE, null).enabled },
+                    override, effective.enabled
+                )
+            }
+        )
+    }
+
     private fun readCache(prefs: SharedPreferences, boot: Int): Cached? = try {
         prefs.getString("last_config", null)?.takeIf { prefs.getString("install_id", null) == installId }?.let {
             val config = parseClientConfig(JSONObject(it))
@@ -180,7 +238,7 @@ internal class ClientConfigRepository(
             val sameBoot = boot >= 0 && boot == prefs.getInt(FETCHED_BOOT, -1)
             // Once the boot changes there is no trustworthy elapsed age until a refresh.
             val anchor = savedAnchor.takeIf { sameBoot && it in 0..SystemClock.elapsedRealtime() }
-            Cached(config, anchor)
+            Cached(config, anchor, prefs.getLong("fetched_at", 0).takeIf { it > 0 })
         }
     } catch (_: JSONException) {
         null

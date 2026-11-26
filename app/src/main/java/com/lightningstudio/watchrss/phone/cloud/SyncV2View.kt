@@ -32,7 +32,7 @@ internal object SyncV2View {
         }
         if (state.unopenableNotes.isNotEmpty()) out += Notice("unopenable", "有 ${state.unopenableNotes.size} 条笔记本机无法打开", "这些笔记太大，请在手机或小程序查看。", Tone.MUTED, "查看列表", Target.UNOPENABLE)
         if (state.recoveryCopies.isNotEmpty()) out += Notice("recovery", "可找回的本机修改", "被替换的本机修改保留 7 天。", Tone.MUTED, "查看", Target.RECOVERY)
-        if (state.gates.historyRestore) out += Notice("history", "历史版本", "可以把云端资料回到较早的版本。", Tone.MUTED, "查看历史", Target.HISTORY)
+        if (state.gates.historyRestore) out += Notice("history", "历史快照", "可以把云端资料恢复到较早的快照。", Tone.MUTED, "恢复历史快照", Target.HISTORY)
         return out
     }
 

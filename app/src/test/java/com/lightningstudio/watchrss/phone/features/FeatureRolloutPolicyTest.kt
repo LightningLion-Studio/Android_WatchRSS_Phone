@@ -32,11 +32,14 @@ class FeatureRolloutPolicyTest {
     }
 
     @Test
-    fun shutdownAndVersionBoundsPrecedeAllOverrides() {
+    fun localOverrideBypassesCloudBoundsButRequiresEligibility() {
         val forced = defaults.copy(forced = FeatureOverride.ON)
-        assertFalse(decide(forced.copy(percent = 0), FeatureOverride.ON).enabled)
-        assertFalse(decide(forced.copy(minAppVersionCode = 122), FeatureOverride.ON).enabled)
-        assertFalse(decide(forced.copy(maxAppVersionCode = 120), FeatureOverride.ON).enabled)
+        assertTrue(decide(forced.copy(percent = 0), FeatureOverride.ON).enabled)
+        assertFalse(decide(forced.copy(percent = 0)).enabled)
+        assertTrue(decide(forced.copy(minAppVersionCode = 125), FeatureOverride.ON).enabled)
+        assertFalse(decide(forced.copy(minAppVersionCode = 125)).enabled)
+        assertTrue(decide(forced.copy(maxAppVersionCode = 120), FeatureOverride.ON).enabled)
+        assertFalse(decide(forced.copy(maxAppVersionCode = 120)).enabled)
         assertTrue(decide(forced.copy(minAppVersionCode = 121, maxAppVersionCode = 121)).enabled)
         assertEquals(FeatureDecision(false, RolloutSource.INELIGIBLE),
             FeatureRolloutPolicy.decide(forced, installId, false, 121, FeatureOverride.ON))

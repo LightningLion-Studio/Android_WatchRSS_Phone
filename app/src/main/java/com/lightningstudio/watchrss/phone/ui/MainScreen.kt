@@ -2,6 +2,11 @@ package com.lightningstudio.watchrss.phone.ui
 
 import android.content.Intent
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.ui.input.pointer.pointerInput
+import com.lightningstudio.watchrss.phone.rollout.FeatureDebugActivity
 import androidx.compose.material.icons.filled.SupportAgent
 import com.lightningstudio.watchrss.phone.SupportActivity
 import androidx.activity.compose.PredictiveBackHandler
@@ -2635,7 +2640,19 @@ private fun MainTopBar(
                 Text(
                     text = title,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = if (page == MainPage.DASHBOARD) Modifier.pointerInput(context) {
+                        awaitEachGesture {
+                            awaitFirstDown()
+                            val released = withTimeoutOrNull(1000L) {
+                                waitForUpOrCancellation()
+                                true
+                            }
+                            if (released == null) {
+                                context.startActivity(Intent(context, FeatureDebugActivity::class.java))
+                            }
+                        }
+                    } else Modifier
                 )
                 if (page == MainPage.CHANNEL && selectedChannel?.source != null) {
                     IconButton(

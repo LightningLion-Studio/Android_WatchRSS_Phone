@@ -21,6 +21,8 @@ class SyncV2ViewTest {
             recoveryCopies = listOf(SyncV2UiState.RecoveryCopy("c", 1, 2)))
         val n = SyncV2View.notices(state)
         assertEquals(listOf("choice", "recovery", "history"), n.map { it.key })
+        assertEquals("恢复历史快照", n[2].openLabel)
+        assertEquals(SyncV2View.Target.HISTORY, n[2].target)
         assertEquals("需要选择保留哪一份", n[0].title)
         assertTrue(n[0].detail.endsWith("选择前不会上传。"))
         assertEquals("云端已回到较早版本", SyncV2View.notices(state.copy(choice = state.choice!!.copy(kind = "rollback")))[0].title)

@@ -103,9 +103,9 @@ class ProfileActivity : ComponentActivity() {
                     onAccountClick = {
                         startActivity(AccountActivity.createIntent(this@ProfileActivity))
                     },
-                    onCloudSyncClick = {
-                        startActivity(AccountActivity.createIntent(this@ProfileActivity, section = AccountSection.CLOUD_SYNC))
-                    },
+                    onCloudSyncClick = if (com.lightningstudio.watchrss.phone.cloud.rememberCloudSyncEntryAllowed(container)) {
+                        { startActivity(AccountActivity.createIntent(this@ProfileActivity, section = AccountSection.CLOUD_SYNC)) }
+                    } else null,
                     onSettingsClick = {
                         startActivity(SettingsActivity.createIntent(this@ProfileActivity))
                     },
@@ -251,7 +251,7 @@ private fun ProfileScreen(
     onDetailSelected: (ProfileDetailPage?) -> Unit,
     onBack: () -> Unit,
     onAccountClick: () -> Unit,
-    onCloudSyncClick: () -> Unit,
+    onCloudSyncClick: (() -> Unit)?,
     onSettingsClick: () -> Unit,
     onManageDataClick: () -> Unit,
     onAboutClick: () -> Unit,
@@ -355,7 +355,7 @@ private fun ProfileMasterPane(
     windowInfo: AdaptiveWindowInfo,
     onBack: () -> Unit,
     onAccountClick: () -> Unit,
-    onCloudSyncClick: () -> Unit,
+    onCloudSyncClick: (() -> Unit)?,
     onSettingsClick: () -> Unit,
     onManageDataClick: () -> Unit,
     onAboutClick: () -> Unit,
@@ -531,7 +531,7 @@ private fun ProfileIdentityCard(
 @Composable
 private fun ProfileNavigation(
     windowInfo: AdaptiveWindowInfo,
-    onCloudSyncClick: () -> Unit,
+    onCloudSyncClick: (() -> Unit)?,
     onSettingsClick: () -> Unit,
     onManageDataClick: () -> Unit,
     onAboutClick: () -> Unit,
@@ -558,7 +558,7 @@ private fun ProfileNavigation(
             icon = Icons.Default.Settings,
             onClick = onSettingsClick
         )
-        ProfileEntry(
+        if (onCloudSyncClick != null) ProfileEntry(
             title = "云同步",
             supportingText = "云端资料、恢复密钥与设备授权",
             icon = Icons.Default.Sync,

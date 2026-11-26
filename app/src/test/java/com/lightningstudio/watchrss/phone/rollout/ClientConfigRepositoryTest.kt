@@ -470,13 +470,17 @@ class ClientConfigRepositoryTest {
     }
 
     @Test
-    fun debugOverrideCanBeCleared() = runBlocking {
+    fun restoringOneDebugOverrideRemovesOnlyThatPersistedOverride() = runBlocking {
         MockWebServer().use { server ->
             val repo = repository(server)
             repo.setDebugOverride(feature, FeatureOverride.ON)
-            assertEquals(FeatureOverride.ON, repo.loadDebugOverride(feature))
+            repo.setDebugOverride(FeatureRegistry.syncHeadPoll, FeatureOverride.OFF)
+            assertEquals(FeatureOverride.ON, repository(server).loadDebugOverride(feature))
             repo.setDebugOverride(feature, null)
             assertNull(repo.loadDebugOverride(feature))
+            val restarted = repository(server)
+            assertNull(restarted.loadDebugOverride(feature))
+            assertEquals(FeatureOverride.OFF, restarted.loadDebugOverride(FeatureRegistry.syncHeadPoll))
         }
     }
 
@@ -509,13 +513,13 @@ class ClientConfigRepositoryTest {
             assertEquals(2L, debug.config.version)
             assertEquals(clock, debug.fetchedAt)
             assertEquals(true, debug.features.single { it.key == feature.key }.bucketHit)
-            assertEquals("已启用（云控）", debug.features.single { it.key == feature.key }.status())
+            assertEquals("云控 · 放量 ${bucket + 1}% · 命中", debug.features.single { it.key == feature.key }.status)
             assertTrue(repo.cloudSyncEntryAllowed(alreadyEnabled = false))
 
             repo.setDebugOverride(feature, FeatureOverride.OFF)
             val overridden = repo.debugSnapshot().features.single { it.key == feature.key }
             assertEquals(true, overridden.remoteEnabled)
-            assertEquals("未启用（强制）", overridden.status())
+            assertEquals("本机强制 · 云端为 开（放量 ${bucket + 1}% · 命中）", overridden.status)
             assertFalse(repo.cloudSyncEntryAllowed(alreadyEnabled = false))
             assertTrue(repo.cloudSyncEntryAllowed(alreadyEnabled = true))
 

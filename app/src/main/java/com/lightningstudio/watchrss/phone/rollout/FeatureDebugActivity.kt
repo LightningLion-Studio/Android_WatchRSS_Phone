@@ -5,6 +5,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -19,22 +20,29 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.lightningstudio.watchrss.phone.PhoneCompanionApplication
 import com.lightningstudio.watchrss.phone.features.FeatureOverride
 import com.lightningstudio.watchrss.phone.features.FeatureRegistry
 import com.lightningstudio.watchrss.phone.ui.theme.WatchRssPhoneTheme
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.text.DateFormat
 import java.util.Date
 
@@ -51,6 +59,7 @@ class FeatureDebugActivity : ComponentActivity() {
                 container.cloudSyncService.localKeyChanges.collectAsState().value
                 val snapshot = repository.debugSnapshot()
                 val scope = rememberCoroutineScope()
+                val overrideWrites = remember { Mutex() }
                 var refreshing by remember { mutableStateOf(false) }
                 Scaffold(topBar = {
                     TopAppBar(title = { Text("调试") }, navigationIcon = {
@@ -61,7 +70,7 @@ class FeatureDebugActivity : ComponentActivity() {
                 }) { insets ->
                     Column(
                         Modifier.fillMaxSize().padding(insets).verticalScroll(rememberScrollState()).padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(snapshot.configStatus)
                         val date = snapshot.fetchedAt?.let { DateFormat.getDateTimeInstance().format(Date(it)) }
@@ -76,33 +85,61 @@ class FeatureDebugActivity : ComponentActivity() {
                         FeatureRegistry.entries.zip(snapshot.features).forEach { (feature, state) ->
                             val alreadyEnabled = feature == FeatureRegistry.cloudSyncEntry &&
                                 container.cloudSyncService.hasLocalAccountKey()
-                            val next = when (state.override) {
-                                null -> FeatureOverride.ON
-                                FeatureOverride.ON -> FeatureOverride.OFF
-                                FeatureOverride.OFF -> null
-                            }
-                            val overrideLabel = when (state.override) {
-                                null -> "跟随云端"
-                                FeatureOverride.ON -> "强制开"
-                                FeatureOverride.OFF -> "强制关"
-                            }
-                            Card(Modifier.fillMaxWidth()) {
-                                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    Text(feature.key, style = MaterialTheme.typography.titleMedium)
-                                    Text(state.status(alreadyEnabled), style = MaterialTheme.typography.bodyLarge)
-                                    Text("云端值 ${state.cloudValue}", style = MaterialTheme.typography.bodySmall)
-                                    TextButton(onClick = { scope.launch { repository.setDebugOverride(feature, next) } }) {
-                                        Text("本机覆盖 · $overrideLabel")
-                                    }
+                            FeatureDebugCard(state, enabled = alreadyEnabled || state.enabled) { override ->
+                                scope.launch {
+                                    overrideWrites.withLock { repository.setDebugOverride(feature, override) }
                                 }
                             }
                         }
-                        OutlinedButton(onClick = { scope.launch { repository.clearDebugOverrides() } }) {
+                        OutlinedButton(onClick = {
+                            scope.launch {
+                                overrideWrites.withLock { repository.clearDebugOverrides() }
+                            }
+                        }) {
                             Text("全部恢复跟随云端")
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+internal fun FeatureDebugCard(
+    state: ClientFeatureDebugState,
+    enabled: Boolean,
+    onOverrideChange: (FeatureOverride?) -> Unit
+) {
+    Card(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(state.key, style = MaterialTheme.typography.titleMedium)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        state.status,
+                        modifier = Modifier.weight(1f),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    if (state.override != null) {
+                        TextButton(onClick = { onOverrideChange(null) }) {
+                            Text("恢复云控", style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
+                }
+            }
+            Switch(
+                checked = enabled,
+                onCheckedChange = { checked ->
+                    onOverrideChange(if (checked) FeatureOverride.ON else FeatureOverride.OFF)
+                },
+                modifier = Modifier.semantics { contentDescription = state.key }
+            )
         }
     }
 }

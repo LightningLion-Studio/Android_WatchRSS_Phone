@@ -57,6 +57,18 @@ class PhoneCloudStateStore internal constructor(private val preferences: android
         failedCycleScopes.remove(scope)
         true
     }
+    internal fun resetPause(scopeId: String): String? = preferences.getString("reset_pause_$scopeId", null)
+    internal fun setResetPause(scopeId: String, value: String?) {
+        check(preferences.edit().putString("reset_pause_$scopeId", value).commit())
+    }
+    internal fun resetReady(scopeId: String): String? = preferences.getString("reset_ready_$scopeId", null)
+    internal fun setResetReady(scopeId: String, epoch: String) {
+        check(preferences.edit().putString("reset_ready_$scopeId", epoch).commit())
+    }
+    internal fun resetRateLimit(scopeId: String): Long = preferences.getLong("reset_rate_limit_$scopeId", 0L)
+    internal fun setResetRateLimit(scopeId: String, until: Long) {
+        check(preferences.edit().putLong("reset_rate_limit_$scopeId", until).commit())
+    }
     var libraryEpoch: String?
         get() = preferences.getString(scoped("library_epoch"), null)
         set(value) { check(preferences.edit().putString(scoped("library_epoch"), value).commit()) }

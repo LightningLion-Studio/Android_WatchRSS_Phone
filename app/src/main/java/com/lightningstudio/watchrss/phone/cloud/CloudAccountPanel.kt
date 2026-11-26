@@ -63,7 +63,8 @@ fun CloudAccountPanel(
     purchaseReturnRevision: Int,
     purchaseEnabled: Boolean,
     onPurchase: () -> Unit,
-    refreshActive: Boolean = true
+    refreshActive: Boolean = true,
+    onOpenCloudReset: () -> Unit = {}
 ) {
     val usesSyncV2 = service.usesSyncV2
     val syncState by service.state.collectAsState()
@@ -289,7 +290,9 @@ fun CloudAccountPanel(
             val recoveryEnvelopeExists =
                 bootstrap?.keyEnvelopes?.any { it.recipientType == "recovery" } == true
             val hasLocalKey = service.hasLocalAccountKey()
-            if (!recoveryEnvelopeExists && !hasLocalKey && bootstrap != null) {
+            val existingKeyMaterial = recoveryEnvelopeExists || bootstrap?.keyCommitments?.isNotEmpty() == true ||
+                bootstrap?.legacyKeyVersions?.isNotEmpty() == true
+            if (!existingKeyMaterial && !hasLocalKey && bootstrap != null) {
                 // Leaving before activation must not keep an unbacked key around.
                 DisposableEffect(Unit) { onDispose { if (setup != null && !activationInFlight) service.discardRecoverySetup() } }
                 if (setup == null) {
@@ -371,7 +374,7 @@ fun CloudAccountPanel(
                         }
                     }
                 }
-            } else if (recoveryEnvelopeExists && !hasLocalKey) {
+            } else if (!hasLocalKey && bootstrap != null) {
                 Text("可使用恢复词，或请求另一台已授权设备批准此手机。")
                 Button(
                     onClick = { showApprovalDialog = true },
@@ -405,6 +408,11 @@ fun CloudAccountPanel(
                     enabled = !busy && RecoveryWords.parse(recoveryInput).size == 24,
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("使用恢复词授权此手机") }
+                if (service.cloudResetEntryAvailable(bootstrap, userId)) {
+                    TextButton(enabled = !busy, onClick = onOpenCloudReset) {
+                        Text("重置云存储", color = MaterialTheme.colorScheme.error)
+                    }
+                }
                 Text("仅短信登录不能解密。设备审批使用本机硬件保护密钥。")
             } else if (hasLocalKey) {
                 Text(

@@ -360,6 +360,7 @@ class PhoneCompanionContainer(context: Context) {
             deviceId = licenseDeviceIdentity.deviceId,
             legacyDeviceId = deviceIdentity.deviceId,
             cloudEntryEnabled = { clientConfig.cloudSyncEntryAllowed(alreadyEnabled = false) },
+            cloudResetAllowed = { clientConfig.cloudStorageResetAllowed() },
             client = PhoneCloudClient(
                 accountEnvironment,
                 deviceAccessToken = { appAccessCoordinator.deviceAccessToken },

@@ -161,6 +161,9 @@ class CloudKeyManager(
         val entry=userId to release;accountRelease.add(entry)
         return AutoCloseable {accountRelease.remove(entry)}
     }
+    internal fun cloudResetAttempt(userId: String): String? = synchronized(this) {
+        loadedPreferences?.getString(syncV2Name(userId, "cloud-reset-attempt"), null)
+    }
     internal fun syncV2Read(userId:String,name:String):String? = synchronized(this) {
         preferences.getString(syncV2Name(userId,name),null)
     }
@@ -169,6 +172,20 @@ class CloudKeyManager(
     }
     private fun syncV2Name(userId:String,name:String) =
         "syncv2_${CloudSnapshotCodec.sha256("$backendScope:$userId".toByteArray()).take(24)}_$name"
+
+    /** Retain previous wrapping keys until the encrypted old sources are settled. */
+    @Synchronized
+    internal fun archiveCloudResetKeys(userId: String, epoch: String?) {
+        if (epoch == null) return
+        val name = "cloud-reset-keys/$epoch"
+        if (syncV2Read(userId, name) != null) return
+        val archive = org.json.JSONObject()
+        keyVersions(userId).forEach { version ->
+            val key = requireNotNull(getAccountKey(userId, version))
+            try { archive.put(version.toString(), key.base64()) } finally { key.fill(0) }
+        }
+        syncV2Write(userId, name, archive.toString())
+    }
 
     fun clearAccountKeys(userId: String) {
         // Release in-flight holders before taking the storage lock. Their guarded writes take

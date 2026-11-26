@@ -2141,7 +2141,34 @@ internal fun AccountScreen(
                     paneAlive.get() && page == AccountPage.CLOUD_SYNC && !showCloudInventory &&
                         accountRepository.session.value?.userId == owner
 
-                AccountPageScaffold(
+                val resetOwner = session?.userId
+                var resetScreen by remember(resetOwner) { mutableStateOf<Boolean?>(null) }
+                var checkedReset by remember(resetOwner) { mutableStateOf(false) }
+                LaunchedEffect(resetOwner, page, showCloudInventory, reauthenticationOwner) {
+                    if (page != AccountPage.CLOUD_SYNC || showCloudInventory || reauthenticationOwner != null) {
+                        checkedReset = false
+                        resetScreen = null
+                    } else if (resetOwner != null && !checkedReset) {
+                        checkedReset = true
+                        if (accountRepository.hasUsableSession && cloudSyncService.hasPendingCloudStorageReset(resetOwner)) {
+                            resetScreen = true
+                        }
+                    }
+                }
+                val resumeReset = resetScreen
+                if (resumeReset != null && resetOwner != null && page == AccountPage.CLOUD_SYNC &&
+                    reauthenticationOwner == null && accountRepository.hasUsableSession) {
+                    com.lightningstudio.watchrss.phone.cloud.CloudStorageResetScreen(
+                        service = cloudSyncService,
+                        userId = resetOwner,
+                        resume = resumeReset,
+                        onClose = { resetMessage ->
+                            cloudPaneMessage = resetMessage
+                            cloudPaneError.value = null
+                            resetScreen = null
+                        }
+                    )
+                } else AccountPageScaffold(
                     title = if (showCloudInventory) "频道云库存" else "云同步",
                     onBack = ::leaveCloudSync,
                     backEnabled = paneTransition == null
@@ -2173,6 +2200,7 @@ internal fun AccountScreen(
                             purchaseEnabled = purchaseLauncher?.busy == false,
                             onPurchase = { membershipPurchase.open(AccountPage.CLOUD_SYNC) },
                             userId = activeSession.userId,
+                            onOpenCloudReset = { resetScreen = false },
                             refreshActive = page == AccountPage.CLOUD_SYNC,
                             busy = busy,
                             runAction = runAction,

@@ -30,7 +30,7 @@ internal object SyncV2RepoBootstrap {
         SyncV2Codec.hash(JSONObject().put("accountId",accountId).put("legacyDeviceId",legacyDeviceId).put("libraryEpoch",legacyEpoch).put("contentGeneration",legacyGeneration))
 
     internal fun prepareStored(accountId:String,legacyDeviceId:String,legacyEpoch:String,legacyGeneration:String,
-        version:Long,key:(Long)->ByteArray,load:()->JSONObject?,save:(JSONObject)->Unit,deviceId:()->String):Candidate {
+        version:Long,key:(Long)->ByteArray,load:()->JSONObject?,save:(JSONObject)->Unit,resetScope:JSONObject?=null,deviceId:()->String):Candidate {
         SyncV2Codec.unhex(accountId,16)
         if(version !in 1..4294967295L || listOf(legacyDeviceId,legacyEpoch,legacyGeneration).any{it.isEmpty()})SyncV2Codec.fail("authentication_required")
         val fence=fence(accountId,legacyDeviceId,legacyEpoch,legacyGeneration)
@@ -46,13 +46,14 @@ internal object SyncV2RepoBootstrap {
         if(pending.getString("fence")!=fence)SyncV2Codec.fail("scope_mismatch")
         if(pending.has("descriptor")) {
             val result=Candidate(pending.getJSONObject("descriptor"),pending.getJSONObject("recoveryCapsule"))
+            if (resetScope != null && SyncV2Codec.scope(resetScope) != SyncV2Codec.scope(result.scope)) SyncV2Codec.fail("scope_mismatch")
             SyncV2Identity.recover(result.recoveryCapsule,result.descriptor,key(result.descriptor.getJSONObject("body").getLong("wrappingKeyVersion")),accountId,result.scope,SyncV2Codec.oid("repo-descriptor",result.descriptor)).close()
             return result
         }
         val raw=SyncV2Codec.unhex(pending.getString("creatorPrivateHex"),32)
         val signer=try{SyncV2Signing.fromPrivate(raw,pending.getString("creatorDeviceId"),pending.getString("creatorKeyId"))}finally{raw.fill(0)}
         val idKey=SyncV2Codec.unhex(pending.getString("idKeyHex"),32)
-        val scope=JSONObject().put("repoId",pending.getString("repoId")).put("libraryEpoch","1").put("contentGeneration","1")
+        val scope=resetScope ?: JSONObject().put("repoId",pending.getString("repoId")).put("libraryEpoch","1").put("contentGeneration","1")
         val result=try{build(accountId,scope,pending.getString("creationId"),idKey,key(version),version,signer,SyncV2Codec.random(32),SyncV2Codec.random(12))}
             finally{idKey.fill(0);signer.close()}
         pending.put("descriptor",result.descriptor).put("recoveryCapsule",result.recoveryCapsule)

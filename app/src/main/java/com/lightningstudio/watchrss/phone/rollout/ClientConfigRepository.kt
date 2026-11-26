@@ -210,6 +210,9 @@ internal class ClientConfigRepository(
     fun cloudSyncEntryAllowed(alreadyEnabled: Boolean): Boolean =
         alreadyEnabled || decide(currentSnapshot(), FeatureRegistry.cloudSyncEntry, eligible = true).enabled
 
+    fun cloudStorageResetAllowed(): Boolean =
+        decide(currentSnapshot(), FeatureRegistry.cloudStorageReset, eligible = true).enabled
+
     fun b2BuildEligible() = BuildConfig.B2_ENABLED || debugOverride(FeatureRegistry.b2) == FeatureOverride.ON
 
     fun debugSnapshot(): ClientConfigDebugSnapshot {

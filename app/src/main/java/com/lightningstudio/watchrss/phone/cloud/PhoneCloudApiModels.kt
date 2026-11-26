@@ -47,7 +47,10 @@ data class CloudBootstrap(
     val contentGeneration: String? = null,
     val contentClearedAt: String? = null,
     val contentEmpty: Boolean = false,
-    val syncV2: org.json.JSONObject? = null
+    val syncV2: org.json.JSONObject? = null,
+    val cloudResetEnabled: Boolean = false,
+    val cloudResetAt: String? = null,
+    val syncV2ResetScope: org.json.JSONObject? = null
 )
 
 data class CloudSnapshotHead(

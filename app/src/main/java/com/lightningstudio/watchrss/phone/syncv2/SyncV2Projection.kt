@@ -17,7 +17,8 @@ internal class SyncV2Projection(
     private val fault: (String) -> Unit = {},
     private val noteSegments: Boolean = BuildConfig.SYNC_OBJECTS_V2_NOTE_SEGMENTS,
     private val lifetime:SyncV2Lifetime?=null,
-    private val sequenceAllocator:((String)->String)?=null
+    private val sequenceAllocator:((String)->String)?=null,
+    private val resetSources: SyncV2ResetSources? = null
 ):AutoCloseable {
     @Volatile private var closed=false
     private val observedBluetoothHead = java.util.concurrent.atomic.AtomicReference<B2CommitWindow.Head?>()
@@ -1372,6 +1373,40 @@ internal class SyncV2Projection(
             return queued<=body.optLong("tailSeq",0)
         } finally {db.endTransaction()}
     }
+    internal fun captureResetSources(checkActive: () -> Unit) {
+        val migration = resetSources ?: return
+        if (migration.complete() && state().body.optBoolean("resetFollowBaselineChecked")) return
+        do {
+            checkActive()
+            val result = runWindow(maxPages = 4, budgetMillis = 5_000)
+        } while (result.paused)
+        checkActive()
+        writer { state ->
+            val stamp = state.body.getString("businessStamp")
+            if (state.body.optString("reconciledStamp") != stamp || state.body.has("tailR1Seq")) {
+                SyncV2Codec.fail("choice_stale")
+            }
+            migration.complete(stamp)
+            val pendingSources = db.controlQuery("""
+                SELECT 1 FROM syncv2_candidates WHERE scope=?
+                UNION ALL SELECT 1 FROM syncv2_reset_pending WHERE scope=?
+                UNION ALL SELECT 1 FROM syncv2_legacy_inbox WHERE scope=? AND applied=0
+                LIMIT 1
+            """.trimIndent(), arrayOf(scope, scope, scope)).use { it.moveToFirst() }
+            val body = state.body
+            if (!pendingSources && body.isNull("pendingPublish") && body.isNull("pendingAccountAction") &&
+                body.isNull("appliedAccount")) {
+                // The completed scan excluded only acknowledged old footprints. The retained
+                // Room rows are outside the new repository's edit base and stay on this device.
+                body.put("unknownEditBase", false)
+                    .put("tailChoicePending", false)
+                    .put("acknowledgedLocalRevision", state.revision)
+                refreshPending(body)
+            }
+            body.put("resetFollowBaselineChecked", true)
+        }
+    }
+
     private fun reconciliationSemantics()=SyncV2Codec.hash(JSONArray(SyncV2Schema.domains.map{binding(it,"p1-local-v1")}))
     private fun binding(domain: SyncV2Schema.Domain, capability: String): String = SyncV2Codec.hash(JSONObject()
         .put("schema",SyncV2Schema.semanticBinding(db,listOf(domain.table)+when(domain.table){"notes"->listOf("note_conflicts");"phone_articles"->listOf("article_register_provenance");"imported_books"->listOf("imported_book_chapters");"note_assets"->listOf(SyncV2NoteAssetNames.aliases,SyncV2NoteAssetNames.source);else->emptyList()}))
@@ -1518,6 +1553,9 @@ internal class SyncV2Projection(
     private fun project(d: SyncV2Schema.Domain,id: String,value: JSONObject,revision: String,eventAccount: JSONObject?=null,enqueue:Boolean=false,sourceState:JSONObject?=null,ownerBody:JSONObject?=null,forkEdits:Boolean=true,forceFork:Boolean=false) {
         var id2=id; var value2=value
         val owner=ownerBody?:readState().body
+        if (resetSources != null && enqueue && !resetSources.needed(d.kind, id) &&
+            SyncV2ResetSources.sameFootprint(value, resetSources.footprint(d.kind, id)) &&
+            candidate(d.kind, id) == null) return
         if(d.kind=="note"&&forkEdits) owner.optJSONObject("noteIsolation")?.let{iso->
             val source=identity.entity(d.kind,id)
             if(iso.has(source)) {
@@ -1566,6 +1604,7 @@ internal class SyncV2Projection(
         val sourceHash=SyncV2Codec.hash(JSONObject().put("meta",objects.meta).put("state",objects.state).put("provenance",provenance))
         val previous=db.controlQuery("SELECT source_hash FROM syncv2_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{if(it.moveToFirst())it.getString(0) else null}
         if(previous==sourceHash) return
+        if (enqueue) resetSources?.capture(d.kind, id2, sourceHash, value2, provenance) { accountSeal("reset-pending", it) }
         accountCatalog.put("candidate",JSONObject().put("meta",objects.meta).put("state",objects.state))
         val base=eventAccount?.let { JSONObject().put("accountOid",it.getString("oid")).put("generation",it.getString("generation")) }
         if(base!=null) {

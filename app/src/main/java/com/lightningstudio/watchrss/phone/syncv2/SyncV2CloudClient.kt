@@ -1,5 +1,7 @@
 package com.lightningstudio.watchrss.phone.syncv2
 
+import com.lightningstudio.watchrss.phone.cloud.CLOUD_RESET_HEADER
+import com.lightningstudio.watchrss.phone.cloud.cloudResetSignal
 import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.cloud.CloudHeadReply
 import com.lightningstudio.watchrss.phone.network.CloudCallCancellation
@@ -34,7 +36,9 @@ internal class SyncV2CloudClient(
         .followRedirects(false).followSslRedirects(false).callTimeout(30, TimeUnit.SECONDS).build(),
     authenticatedBackend: HttpUrl? = null,
     private val trustedTime:SyncV2TrustedTime?=null,
-    private val onAuthenticationResponse:(String,Int,String)->Unit={_,_,_->}
+    private val onAuthenticationResponse:(String,Int,String)->Unit={_,_,_->},
+    private val cloudResetSupported: Boolean = false,
+    private val onCloudReset: (String, Boolean) -> Unit = { _, _ -> }
 ):AutoCloseable {
     @Volatile private var closed=false
     private val calls=java.util.concurrent.ConcurrentHashMap.newKeySet<okhttp3.Call>()
@@ -112,7 +116,11 @@ internal class SyncV2CloudClient(
                     val code=SyncV2Wire.string(error,"code")
                     if(!Regex("[a-z][a-z0-9_]{0,63}").matches(code) || error.get("retryable") !is Boolean)SyncV2Codec.fail("invalid_schema")
                     val delay=if(error.isNull("retryAfterMillis"))null else SyncV2Wire.uint(error,"retryAfterMillis",60000)
-                    throw SyncV2CloudError(code,error.getBoolean("retryable"),delay?:if(bodyChannel && response.code in setOf(429,507))60000L else null,JSONObject(error.getJSONObject("details").toString()))
+                    val details = JSONObject(error.getJSONObject("details").toString())
+                    if (cloudResetSignal(response.code, code, null, details.optJSONArray("requiredFeatures"))) {
+                        onCloudReset(s.userId, response.code == 426)
+                    }
+                    throw SyncV2CloudError(code,error.getBoolean("retryable"),delay?:if(bodyChannel && response.code in setOf(429,507))60000L else null,details)
                 }
                 if(raw && !bodyChannel) {
                     if(response.code != if(headers.containsKey("Range"))206 else 200)SyncV2Codec.fail("invalid_range")
@@ -130,6 +138,7 @@ internal class SyncV2CloudClient(
             .header("x-watchrss-cloud-device-id", session.legacyDeviceId)
             .header("x-watchrss-library-epoch", session.legacyEpoch)
             .header("x-watchrss-content-generation", session.legacyGeneration)
+            .apply { if (cloudResetSupported) header(CLOUD_RESET_HEADER, "1") }
             .header("Accept", if (raw) "application/octet-stream" else "application/json")
             .apply { session.deviceAuthorization?.let { header("x-watchrss-device-authorization", it) } }
 
@@ -145,6 +154,16 @@ internal class SyncV2CloudClient(
             execute(call) { response ->
                 active()
                 when (response.code) {
+                    409, 426 -> {
+                        val error = headResponseJson(response).getJSONObject("error")
+                        val code = error.getString("code")
+                        val details = error.optJSONObject("details") ?: JSONObject()
+                        if (cloudResetSignal(response.code, code, null, details.optJSONArray("requiredFeatures"))) {
+                            onCloudReset(active().userId, response.code == 426)
+                            throw SyncV2CloudError(code, details = details)
+                        }
+                        throw IOException("Account head HTTP ${response.code}")
+                    }
                     304 -> CloudHeadReply.Unchanged
                     404, 405 -> CloudHeadReply.Unsupported
                     400, 403 -> {

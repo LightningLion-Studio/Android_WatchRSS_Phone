@@ -14,6 +14,7 @@ import com.lightningstudio.watchrss.phone.data.local.hasReadableArticleBody
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Mutex
@@ -51,10 +52,12 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
     private val signals:()->SyncV2TransportSignals={SyncV2AndroidTransport.sample(context)},
     private val clock:()->Long=android.os.SystemClock::elapsedRealtime,
     private val contentEnabled:Boolean=true,
-    private val onAuthenticationResponse:(String,Int,String)->Unit={_,_,_->}) {
+    private val onAuthenticationResponse:(String,Int,String)->Unit={_,_,_->},
+    private val cloudResetSupported: Boolean = false,
+    private val onCloudReset: (String, Boolean) -> Unit = { _, _ -> }) {
     data class Account(val userId:String,val backendBaseUrl:String,val legacyDeviceId:String,val epoch:String,val generation:String,
-        val bearer:String,val apiKey:String,val deviceAuthorization:String?,val sessionGeneration:Long=0) {
-        fun owner()=listOf(userId,backendBaseUrl,legacyDeviceId,epoch,generation,sessionGeneration.toString())
+        val bearer:String,val apiKey:String,val deviceAuthorization:String?,val sessionGeneration:Long=0, val resetScope: String? = null) {
+        fun owner()=listOf(userId,backendBaseUrl,legacyDeviceId,epoch,generation,sessionGeneration.toString(), resetScope.orEmpty())
         val accountId get()=userId.replace("-","").lowercase()
     }
     data class Result(
@@ -62,7 +65,8 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
         val reason: String? = null,
         val awaitingChoice: Boolean = false,
         val pendingAction: Boolean = false,
-        val pendingBodies: Boolean = false
+        val pendingBodies: Boolean = false,
+        val quotaBlocked: Boolean = false
     )
     private val mutex=Mutex()
     private val generation=SyncV2Lifetime.Generation()
@@ -151,16 +155,18 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
         syncV2: JSONObject?,
         manual: Boolean = false,
         restoreCurrent: Boolean = false,
-        expectedUserId: String? = null
+        expectedUserId: String? = null,
+        initializeOnly: Boolean = false
     ): Result = withContext(Dispatchers.IO) {
         if(!enabled() || syncV2==null) {
             release()
             return@withContext Result(false,if(!enabled())"feature_disabled"else"not_announced")
         }
+        val context = kotlin.coroutines.coroutineContext
         try {
             mutex.withLock {
                 SyncV2CloudClient.runCancellable {
-                    syncLocked(syncV2, manual, restoreCurrent, expectedUserId)
+                    syncLocked(syncV2, manual, restoreCurrent, expectedUserId, initializeOnly, context::ensureActive)
                 }
             }
         } catch(error:SyncV2CloudError) {
@@ -172,7 +178,7 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
     }
 
     private fun syncLocked(
-        syncV2: JSONObject, manual: Boolean, restoreCurrent: Boolean, expectedUserId: String?
+        syncV2: JSONObject, manual: Boolean, restoreCurrent: Boolean, expectedUserId: String?, initializeOnly: Boolean, checkActive: () -> Unit
     ): Result {
         val account=current()?:SyncV2Codec.fail("authentication_required")
         if (expectedUserId != null && account.userId != expectedUserId) {
@@ -189,6 +195,15 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
         val live=runtime?:open(account,syncV2,allowCreate=!restoreCurrent)
         live.life.check()
         live.life.guard {live.keys.refreshAuthenticated(keys,account.userId){verifyKeys(account,it)}}
+        live.projection.captureResetSources(checkActive)
+        if (initializeOnly) {
+            if (live.signingDeviceId() == null) {
+                // Establish authenticated time before building a new signing binding.
+                live.cloud.readCurrent()
+                live.actions.prepareSigning()
+            }
+            return Result(true)
+        }
         return try {
             live.round(manual, restoreCurrent)
             _uiPort.value?.refresh()
@@ -200,7 +215,8 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
                     !state.isNull("pendingAppliedAck") ||
                     (restoreCurrent && !state.isNull("pendingPublish")),
                 pendingBodies = live.bodyResult.pending > 0 || live.bodyResult.errors.isNotEmpty() ||
-                    live.hasMissingImportedArticleBody(FileArticleContentStore(context))
+                    live.hasMissingImportedArticleBody(FileArticleContentStore(context)),
+                quotaBlocked = "quota_exceeded" in live.bodyResult.errors
             )
         } catch(e:Throwable) {
             if (e !is CancellationException) _uiPort.value?.failed(e)
@@ -214,7 +230,13 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
         try {
             life.own(keys.onAccountRelease(account.userId){release()})
             val ring=life.guard {life.own(SyncV2ContentKeys.authenticated(keys,account.userId){verifyKeys(account,it)})}
-            val store=SyncV2AccountStore(keys,account.userId,life)
+            val store=SyncV2AccountStore(keys,account.userId,life,account.resetScope)
+            val resetScope = account.resetScope?.let(::JSONObject)
+            val db = database().openHelper.writableDatabase
+            val resetSources = account.resetScope?.let {
+                val depot = File(context.noBackupFilesDir, "cloud-reset/${account.accountId}")
+                life.own(SyncV2ResetSources.open(db, store, it, context.filesDir, depot))
+            }
             val aliases=SyncV2DeviceAlias(store,account.accountId,account.legacyDeviceId,account.epoch,account.generation)
             val trust=SyncV2ServiceTrust.fromBootstrap(account.accountId,syncV2,store.read("service-pin")){store.write("service-pin",it)}
             val time=life.own(SyncV2TrustedTime(clock))
@@ -222,10 +244,11 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             fun client(scope:JSONObject,deviceId:String):SyncV2CloudClient=life.own(SyncV2CloudClient(base,{
                 life.check();val current=current()?:SyncV2Codec.fail("authentication_required")
                 SyncV2CloudClient.Session(current.userId,current.legacyDeviceId,current.epoch,current.generation,SyncV2Codec.scope(scope),deviceId,current.bearer,current.apiKey,current.deviceAuthorization)
-            },trust,true,authenticatedBackend=account.backendBaseUrl.toHttpUrl(),trustedTime=time,onAuthenticationResponse=onAuthenticationResponse))
+            },trust,true,authenticatedBackend=account.backendBaseUrl.toHttpUrl(),trustedTime=time,onAuthenticationResponse=onAuthenticationResponse, cloudResetSupported=cloudResetSupported,
+                onCloudReset=onCloudReset))
             val pending=store.pending()
             var capsule:JSONObject?=null
-            var discovery=client(JSONObject().put("repoId","00".repeat(16)).put("libraryEpoch","1").put("contentGeneration","1"),"00".repeat(16))
+            var discovery=client(resetScope ?: JSONObject().put("repoId","00".repeat(16)).put("libraryEpoch","1").put("contentGeneration","1"),"00".repeat(16))
             var descriptor:JSONObject?=null
             val initRejected=pending?.optBoolean("initRejected")==true
             if(pending==null || initRejected || !allowCreate) {
@@ -235,10 +258,10 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             if(!allowCreate && descriptor==null)throw SyncV2CloudError("current_library_missing")
             if(initRejected && descriptor==null)SyncV2Codec.fail("object_missing")
             if(descriptor==null) {
-                if(pending==null && store.read("pin")!=null)SyncV2Codec.fail("identity_conflict")
+                if(resetScope==null && pending==null && store.read("pin")!=null)SyncV2Codec.fail("identity_conflict")
                 val candidate=life.guard {
                     val alias=aliases.bootstrap(pending)
-                    SyncV2RepoBootstrap.prepareStored(account.accountId,account.legacyDeviceId,account.epoch,account.generation,ring.newestVersion,ring::read,store::pending,store::pending) {alias}
+                    SyncV2RepoBootstrap.prepareStored(account.accountId,account.legacyDeviceId,account.epoch,account.generation,ring.newestVersion,ring::read,store::pending,store::pending,resetScope) {alias}
                 }
                 discovery=client(candidate.scope,candidate.descriptor.getJSONObject("body").getString("creatorDeviceId"))
                 discovery.capabilities()
@@ -255,6 +278,9 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             }
             life.check()
             val descriptorBody=descriptor!!.getJSONObject("descriptor").getJSONObject("body")
+            if (account.resetScope != null && SyncV2Codec.scope(descriptorBody.getJSONObject("scope")) != account.resetScope) {
+                SyncV2Codec.fail("scope_mismatch")
+            }
             val wrappingVersion=SyncV2Wire.uint(descriptorBody,"wrappingKeyVersion",4294967295)
             if(wrappingVersion==0L)SyncV2Codec.fail("invalid_schema")
             ring.read(wrappingVersion)
@@ -289,8 +315,8 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             val deviceId=signer?.deviceId?:"00".repeat(16)
             val control=client(identity.scope,deviceId)
             val contentClient=client(identity.scope,deviceId)
-            val projection=life.guard {life.own(SyncV2Projection(database().openHelper.writableDatabase,identity,local,true,
-                noteSegments=BuildConfig.SYNC_OBJECTS_V2_NOTE_SEGMENTS,lifetime=life,sequenceAllocator=vault::reserve).also{it.install()})}
+            val projection=life.guard {life.own(SyncV2Projection(db,identity,local,true,
+                noteSegments=BuildConfig.SYNC_OBJECTS_V2_NOTE_SEGMENTS,lifetime=life,sequenceAllocator=vault::reserve,resetSources=resetSources).also{it.install()})}
             val content=life.guard {life.own(SyncV2ContentStore(File(context.filesDir,"syncv2/$path"),identity.scopeJson,local.copyOf()))}
             val cloud=SyncV2CloudSync(control,identity,projection,approved,ring::read,{time.now()?:System.currentTimeMillis()})
             val actions=life.guard {life.own(SyncV2AccountActions(control,identity,projection,signer,ring::read,approved,context.filesDir,true,time::now,

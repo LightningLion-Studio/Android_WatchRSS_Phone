@@ -67,6 +67,14 @@ class PhoneCloudSyncWorker(
             WorkManager.getInstance(context).enqueueUniqueWork("watchrss-cloud-snapshot-window",ExistingWorkPolicy.REPLACE,request)
         }
 
+        internal fun scheduleResetUpload(context: Context) {
+            val request = OneTimeWorkRequestBuilder<PhoneCloudSyncWorker>()
+                .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+                .build()
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                "watchrss-cloud-reset-upload", ExistingWorkPolicy.KEEP, request)
+        }
+
         fun scheduleFollowUp(context: Context) {
             val request=OneTimeWorkRequestBuilder<PhoneCloudSyncWorker>()
                 .setInitialDelay(30,TimeUnit.SECONDS)
@@ -76,6 +84,7 @@ class PhoneCloudSyncWorker(
         }
 
         fun cancel(context: Context) {
+            WorkManager.getInstance(context).cancelUniqueWork("watchrss-cloud-reset-upload")
             WorkManager.getInstance(context).cancelUniqueWork("watchrss-cloud-follow-up")
             WorkManager.getInstance(context).cancelUniqueWork("watchrss-cloud-snapshot-window")
             WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME)

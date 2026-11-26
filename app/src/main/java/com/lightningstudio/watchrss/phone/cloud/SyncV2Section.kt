@@ -47,9 +47,10 @@ import kotlinx.coroutines.launch
 
 @Composable
 internal fun CloudSyncRoundNotice(usesSyncV2: Boolean, state: PhoneCloudSyncState) {
-    if (!usesSyncV2) return
+    val resetPaused = state.phase == CloudSyncPhase.NEEDS_RECOVERY && state.errorCode == "cloud_reset"
+    if (!usesSyncV2 && !resetPaused) return
     val timedOut = state.phase == CloudSyncPhase.ERROR && state.errorCode == "sync_timeout"
-    if (timedOut || state.phase == CloudSyncPhase.BLOCKED) {
+    if (timedOut || resetPaused || state.phase == CloudSyncPhase.BLOCKED) {
         Text(
             state.message.ifBlank { SyncV2View.errorText(state.errorCode ?: "feature_disabled") },
             style = MaterialTheme.typography.bodySmall,

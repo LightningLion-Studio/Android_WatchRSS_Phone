@@ -62,6 +62,8 @@ class PhoneCloudClient(
     internal var blockLegacyBusiness: () -> Boolean = { false }
     internal var onDeviceKeyConflict: (PhoneAccountSession) -> Unit = {}
     internal var epochRequestGeneration: () -> Long = { 0L }
+    internal var cloudResetSupported: () -> Boolean = { false }
+    internal var onCloudReset: (PhoneAccountSession, Long, Boolean) -> Unit = { _, _, _ -> }
     internal var onEpochMismatch: (PhoneAccountSession, Long) -> Unit = { session, _ -> forgetEpoch(session) }
     internal var onBootstrap: suspend (PhoneAccountSession, CloudBootstrap) -> Unit = { _, _ -> }
     internal var onRecordMetadata: suspend (PhoneAccountSession, JSONObject) -> Unit = { _, _ -> }
@@ -113,8 +115,10 @@ class PhoneCloudClient(
             response.jsonBody().memberState()
         }
 
-    suspend fun bootstrap(session: PhoneAccountSession): CloudBootstrap {
-        val (json, requestedGeneration) = post(session, "/functions/v1/cloud/bootstrap", JSONObject()).use { it.jsonBody() to it.request.tag(CloudContentRequestGeneration::class.java) }
+    suspend fun bootstrap(session: PhoneAccountSession): CloudBootstrap = readBootstrap(session, true)
+
+    internal suspend fun readBootstrap(session: PhoneAccountSession, observe: Boolean): CloudBootstrap {
+        val (json, requestedGeneration) = post(session, "/functions/v1/cloud/bootstrap", JSONObject(), expectedEpoch = null).use { it.jsonBody() to it.request.tag(CloudContentRequestGeneration::class.java) }
         val result = CloudBootstrap(
             member = json.getJSONObject("member").memberState(),
             devices = json.getJSONArray("devices").objects { it.device() }.filterNot { it.deviceId.startsWith("reader-migration-") },
@@ -123,11 +127,21 @@ class PhoneCloudClient(
             keyCommitments = parseCommitments(json),
             legacyKeyVersions = json.optJSONArray("legacyKeyVersions")?.let { versions -> (0 until versions.length()).map { versions.getInt(it) } } ?: emptyList(),
             contentGeneration = json.nullableString("contentGeneration"), contentClearedAt = json.nullableString("contentClearedAt"),
-            contentEmpty = json.optBoolean("contentEmpty"), syncV2 = json.optJSONObject("syncV2"))
-        onBootstrap(session, result)
-        observeContentMetadata(session, json, requestedGeneration)
+            contentEmpty = json.optBoolean("contentEmpty"), syncV2 = json.optJSONObject("syncV2"),
+            cloudResetEnabled = json.optBoolean("cloudResetEnabled"), cloudResetAt = json.nullableString("cloudResetAt"),
+            syncV2ResetScope = json.optJSONObject("syncV2ResetScope"))
+        if (observe) {
+            onBootstrap(session, result)
+            observeContentMetadata(session, json, requestedGeneration)
+        }
         return result
     }
+
+    internal suspend fun resetIntent(session: PhoneAccountSession, epoch: String): CloudResetIntent =
+        CloudResetIntent(v2Post(session, "/functions/v1/cloud/reset-intent", JSONObject(), epoch), epoch)
+
+    internal suspend fun executeReset(session: PhoneAccountSession, epoch: String, body: JSONObject): JSONObject =
+        v2Post(session, "/functions/v1/cloud/reset", body, epoch)
 
     internal fun parseCommitments(json: JSONObject): List<CloudKeyCommitment> =
         (json.optJSONArray("keyCommitments") ?: JSONArray()).objects {
@@ -558,6 +572,7 @@ class PhoneCloudClient(
         if (blockLegacyBusiness() && isLegacyCloudBusinessPath(initial.url.encodedPath)) {
             error("此云端操作当前不可用")
         }
+        val resetExecute = initial.url.encodedPath == "/functions/v1/cloud/reset"
         val admissionPath=initial.method!="GET" && (initial.url.encodedPath in setOf("/functions/v1/cloud/records","/functions/v1/cloud/snapshots/reserve","/functions/v1/cloud/snapshots/complete") || initial.url.encodedPath.startsWith("/functions/v1/cloud/uploads/"))
         val requiresR48=initial.tag(CloudR48WriteRequired::class.java)?.value==true
         val admission=admissionPath && allowR48Writes() && CloudFormatWritePolicy(true,false).canWrite(formatCapabilities(session))
@@ -567,6 +582,7 @@ class PhoneCloudClient(
             .tag(CloudContentRequestGeneration::class.java, CloudContentRequestGeneration(expectedGeneration))
             .also { checkSession(session) }
             .withWatchRssAppVersionHeader()
+            .apply { if (cloudResetSupported()) header(CLOUD_RESET_HEADER, "1") }
             .header("authorization", "Bearer ${session.accessToken}")
             .apply {
                 removeHeader("x-watchrss-device-authorization")
@@ -607,6 +623,16 @@ class PhoneCloudClient(
             else if (bootstrapOrRecords) {
                 callTimeout(30, TimeUnit.SECONDS)
             }
+            if (resetExecute) {
+                retryOnConnectionFailure(false)
+                authenticator(okhttp3.Authenticator.NONE)
+                proxyAuthenticator(okhttp3.Authenticator.NONE)
+                val dispatched = java.util.concurrent.atomic.AtomicBoolean()
+                addNetworkInterceptor { chain ->
+                    if (!dispatched.compareAndSet(false, true)) throw IOException("Cloud reset already sent")
+                    chain.proceed(chain.request())
+                }
+            }
             if (uploadAttempt != null) {
                 // OkHttp otherwise replays a 408 before our refresh/integrity-aware
                 // retry loop can observe it, doubling slow body attempts invisibly.
@@ -634,7 +660,7 @@ class PhoneCloudClient(
         }
         var response = attempt()
         val rejected = response.request.header("x-watchrss-device-authorization")?.removePrefix("Bearer ")
-        if (response.code == 403 && rejected != null && isRefreshableCloudDeviceSessionError(
+        if (!resetExecute && response.code == 403 && rejected != null && isRefreshableCloudDeviceSessionError(
                 runCatching { JSONObject(response.peekBody(4096).string()).optString("error") }.getOrDefault("")
             )) {
             response.close()
@@ -646,7 +672,7 @@ class PhoneCloudClient(
                 throw CloudDeviceSessionRefreshException()
             }
         }
-        if (response.code == 403) {
+        if (!resetExecute && response.code == 403) {
             val code = runCatching { JSONObject(response.peekBody(4096).string()).optString("error") }.getOrDefault("")
             if (code in setOf("device_session_revoked", "device_session_expired", "device_session_invalid")) {
                 response.close()
@@ -660,6 +686,17 @@ class PhoneCloudClient(
             }
         }
         response.also {
+            if (it.code in setOf(409, 426)) {
+                val error = runCatching { JSONObject(it.peekBody(4096).string()) }.getOrNull()
+                val nested = error?.optJSONObject("error")
+                val code = nested?.optString("code") ?: error?.optString("error").orEmpty()
+                if (error != null && cloudResetSignal(it.code, code, error.optString("detail"),
+                        nested?.optJSONObject("details")?.optJSONArray("requiredFeatures"))) {
+                    it.close()
+                    onCloudReset(session, requestGeneration, it.code == 426)
+                    throw CloudHttpException(it.code, error.toString(), serverResponse = true)
+                }
+            }
             if (it.code == 409 && runCatching { JSONObject(it.peekBody(4096).string()).optString("error") }.getOrDefault("") == "device_key_conflict") onDeviceKeyConflict(session)
             if (it.code == 409 && runCatching { JSONObject(it.peekBody(4096).string()).optString("error") }.getOrDefault("") == "library_epoch_mismatch") {
                 onEpochMismatch(session, requestGeneration)
@@ -671,7 +708,9 @@ class PhoneCloudClient(
     private fun okhttp3.Response.throwHttp(): Nothing {
         val detail = body?.string().orEmpty()
         close()
-        throw CloudHttpException(code, detail.ifBlank { message },serverResponse=true)
+        throw CloudHttpException(code, detail.ifBlank { message }, serverResponse = true,
+            retryAfterSeconds = header("Retry-After")?.toLongOrNull()
+                ?: headers.getDate("Retry-After")?.let { (it.time - System.currentTimeMillis()) / 1_000 })
     }
 
     // request() returns after headers; a delayed/chunked body can still read the socket.
@@ -791,7 +830,7 @@ private fun declaresCloudClientUpgrade(detail:String):Boolean = runCatching {
     (if(error is JSONObject)error.optString("code")else error)=="client_upgrade_required"
 }.getOrDefault(false)
 
-internal class CloudHttpException(val status: Int, val detail: String, val serverResponse:Boolean=false) : IOException(if (status == 426 && serverResponse && declaresCloudClientUpgrade(detail)) "请升级到最新版本以继续同步" else if(status==426) "旧同步通道已关闭，请等待可用的 Sync v2 服务" else if (status == 409 && runCatching { JSONObject(detail).optString("error") }.getOrDefault("") == "device_key_conflict") "本机设备身份冲突，请重新登记本机" else "HTTP $status: $detail")
+internal class CloudHttpException(val status: Int, val detail: String, val serverResponse:Boolean=false, val retryAfterSeconds: Long? = null) : IOException(if (status == 426 && serverResponse && declaresCloudClientUpgrade(detail)) "请升级到最新版本以继续同步" else if(status==426) "旧同步通道已关闭，请等待可用的 Sync v2 服务" else if (status == 409 && runCatching { JSONObject(detail).optString("error") }.getOrDefault("") == "device_key_conflict") "本机设备身份冲突，请重新登记本机" else "HTTP $status: $detail")
 
 /** A malicious/misconfigured candidate response cannot allocate beyond the advertised local run budget. */
 internal fun readMigrationBody(input:java.io.InputStream,maximumBytes:Long):ByteArray {

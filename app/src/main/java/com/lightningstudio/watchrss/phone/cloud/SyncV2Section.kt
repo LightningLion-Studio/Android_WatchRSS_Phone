@@ -108,7 +108,7 @@ internal fun SyncV2Section(service: PhoneCloudSyncService, userId: String) {
                         notice.retry != null -> OutlinedButton(enabled = !retrying, onClick = {
                             retrying = true
                             launchAction(alive, { live.syncNow() }) { retrying = false } // The state carries any error code.
-                        }) { Text(if (retrying) "正在重试…" else notice.retry) }
+                        }) { CloudButtonLabel(notice.retry, "正在重试…".takeIf { retrying }) }
                     }
                 }
             }
@@ -222,7 +222,8 @@ private fun ChoiceDialog(port: SyncV2PhoneUiPort, state: SyncV2UiState, onClose:
     SubViewDialog(title, onClose, error) {
         Text("选择前不会上传。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         val p = preview
-        if (p == null) { if (error == null) Text("正在比较两边的修改…", style = MaterialTheme.typography.bodySmall); return@SubViewDialog }
+        if (busy) CloudLoadingRow("正在应用你的选择…")
+        if (p == null) { if (error == null && !busy) CloudLoadingRow("正在比较两边的修改…"); return@SubViewDialog }
         SyncV2View.options(p, state.keepDiscardedLocalChanges7Days).forEach { option ->
             OutlinedCard(
                 modifier = Modifier.fillMaxWidth().clickable(enabled = option.enabled && !busy) {
@@ -275,13 +276,18 @@ private fun RecoveryDialog(port: SyncV2PhoneUiPort, state: SyncV2UiState, onClos
     var notice by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     var restoreId by remember { mutableStateOf<String?>(null) }
-    fun run(work: suspend () -> Unit, after: () -> Unit = {}) {
-        busy = true; error = null
-        launchAction(alive, work) { result -> busy = false; result.onSuccess { after() }.onFailure { error = SyncV2View.errorText(codeOf(it)) } }
+    var working by remember { mutableStateOf<String?>(null) }
+    fun run(label: String, work: suspend () -> Unit, after: () -> Unit = {}) {
+        busy = true; working = label; error = null
+        launchAction(alive, work) { result ->
+            busy = false; working = null
+            result.onSuccess { after() }.onFailure { error = SyncV2View.errorText(codeOf(it)) }
+        }
     }
     SubViewDialog("可找回的本机修改", onClose, error) {
         Text("选择保留云端或回到旧版本时，被替换的本机修改保留 7 天。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         notice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
+        working?.let { CloudLoadingRow(it) }
         if (state.recoveryCopies.isEmpty()) Text("没有可找回的修改。", style = MaterialTheme.typography.bodySmall)
         state.recoveryCopies.forEach { copy ->
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -298,12 +304,12 @@ private fun RecoveryDialog(port: SyncV2PhoneUiPort, state: SyncV2UiState, onClos
                 Text("保留被替换的修改 7 天", style = MaterialTheme.typography.bodyMedium)
                 Text("关闭后，被替换的本机修改不可找回", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Switch(checked = state.keepDiscardedLocalChanges7Days, enabled = !busy, onCheckedChange = { value -> run({ port.setKeepDiscarded(value) }) })
+            Switch(checked = state.keepDiscardedLocalChanges7Days, enabled = !busy, onCheckedChange = { value -> run("正在保存设置…", { port.setKeepDiscarded(value) }) })
         }
     }
     restoreId?.let { id ->
         ConfirmDialog("找回这份修改？", "这份被替换的修改会恢复到本机。", "找回",
-            onConfirm = { restoreId = null; run({ port.restoreRecovery(id) }) { notice = "已找回这份修改。" } },
+            onConfirm = { restoreId = null; run("正在找回这份修改…", { port.restoreRecovery(id) }) { notice = "已找回这份修改。" } },
             onDismiss = { restoreId = null })
     }
 }
@@ -320,6 +326,8 @@ private fun HistoryDialog(port: SyncV2PhoneUiPort, state: SyncV2UiState, onClose
     var error by remember { mutableStateOf<String?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
     var target by remember { mutableStateOf<HistoryRow?>(null) }
+    var paging by remember { mutableStateOf(false) }
+    var rollingBack by remember { mutableStateOf(false) }
 
     fun run(work: suspend () -> Unit, after: () -> Unit = {}) {
         busy = true; error = null
@@ -327,6 +335,7 @@ private fun HistoryDialog(port: SyncV2PhoneUiPort, state: SyncV2UiState, onClose
     }
     fun load(next: String?) = launchAction(alive, { port.history(next) }) { result ->
         busy = false
+        paging = false
         val page = result.getOrElse { error = SyncV2View.errorText(codeOf(it)); return@launchAction }
         val items = page.getJSONArray("items")
         val now = System.currentTimeMillis()
@@ -344,6 +353,8 @@ private fun HistoryDialog(port: SyncV2PhoneUiPort, state: SyncV2UiState, onClose
     SubViewDialog("恢复历史快照", onClose, error) {
         Text("每个快照保留 7 天。恢复快照后，各设备都会同步到该快照。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         notice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
+        if (busy && !loaded) CloudLoadingRow("正在读取历史快照…")
+        if (rollingBack) CloudLoadingRow("正在回到这个版本…")
         if (loaded && rows.isEmpty()) Text("暂无可恢复的历史快照。", style = MaterialTheme.typography.bodySmall)
         rows.forEach { row ->
             Row(Modifier.fillMaxWidth().clickable(enabled = !busy) { target = row }.padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -354,13 +365,20 @@ private fun HistoryDialog(port: SyncV2PhoneUiPort, state: SyncV2UiState, onClose
                 Text("回到这个版本", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
             }
         }
-        token?.let { next -> TextButton(enabled = !busy, onClick = { busy = true; error = null; load(next) }) { Text("加载更早的版本") } }
+        token?.let { next ->
+            TextButton(enabled = !busy, onClick = { busy = true; paging = true; error = null; load(next) }) {
+                CloudButtonLabel("加载更早的版本", "正在加载…".takeIf { paging })
+            }
+        }
     }
     target?.let { row ->
         ConfirmDialog("回到这个版本？", "截至 ${row.time} 的版本。本机未上传的修改会先保存为可找回副本。", "回到此版本",
             onConfirm = {
                 target = null
-                run({ val capture = port.captureRollback(); port.rollback(row.commitOid, capture) }) { notice = "已回到这个版本，其他设备会随后同步。" }
+                rollingBack = true
+                run({
+                    try { val capture = port.captureRollback(); port.rollback(row.commitOid, capture) } finally { rollingBack = false }
+                }) { notice = "已回到这个版本，其他设备会随后同步。" }
             },
             onDismiss = { target = null })
     }
@@ -385,9 +403,9 @@ internal fun SyncV2UnopenableNoteDialog(onDismiss: () -> Unit) {
     )
 }
 
-private enum class SyncV2AccountAction(val label: String, val description: String) {
-    SYNC("立即同步", "同步两边的资料。本次同步可使用当前网络。"),
-    RESTORE("恢复当前云端资料库", "恢复当前云端资料。本机有未同步修改时，先比较两边，再由你选择。")
+private enum class SyncV2AccountAction(val label: String, val description: String, val running: String) {
+    SYNC("立即同步", "同步两边的资料。本次同步可使用当前网络。", "正在同步…"),
+    RESTORE("恢复当前云端资料库", "恢复当前云端资料。本机有未同步修改时，先比较两边，再由你选择。", "正在恢复…")
 }
 
 @Composable
@@ -401,15 +419,18 @@ internal fun SyncV2AccountActions(
     onFailure: (Exception) -> Unit
 ) {
     var pending by remember { mutableStateOf<SyncV2AccountAction?>(null) }
-    Button(onClick = { pending = SyncV2AccountAction.SYNC }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-        Text(SyncV2AccountAction.SYNC.label)
+    var running by remember { mutableStateOf<SyncV2AccountAction?>(null) }
+    Button(onClick = { pending = SyncV2AccountAction.SYNC }, enabled = !busy && running == null, modifier = Modifier.fillMaxWidth()) {
+        CloudButtonLabel(SyncV2AccountAction.SYNC.label, SyncV2AccountAction.SYNC.running.takeIf { running == SyncV2AccountAction.SYNC })
     }
-    OutlinedButton(onClick = { pending = SyncV2AccountAction.RESTORE }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-        Text(SyncV2AccountAction.RESTORE.label)
+    OutlinedButton(onClick = { pending = SyncV2AccountAction.RESTORE }, enabled = !busy && running == null, modifier = Modifier.fillMaxWidth()) {
+        CloudButtonLabel(SyncV2AccountAction.RESTORE.label, SyncV2AccountAction.RESTORE.running.takeIf { running == SyncV2AccountAction.RESTORE })
     }
     pending?.let { action ->
         ConfirmDialog(action.label, action.description, "继续", onConfirm = {
             pending = null
+            if (running != null) return@ConfirmDialog
+            running = action
             onBusyChange(true)
             runAction {
                 try {
@@ -423,6 +444,7 @@ internal fun SyncV2AccountActions(
                 } catch (error: Exception) {
                     onFailure(error)
                 } finally {
+                    running = null
                     onBusyChange(false)
                 }
             }

@@ -23,6 +23,7 @@ internal fun CloudApprovalDialog(service: PhoneCloudSyncService, onAuthorized: (
     val state by service.approvals.state.collectAsState()
     val scope = rememberCoroutineScope()
     var error by remember { mutableStateOf<String?>(null) }
+    var confirming by remember { mutableStateOf(false) }
     LaunchedEffect(service) {
         try {
             service.approvals.beginOrResume()
@@ -56,11 +57,12 @@ internal fun CloudApprovalDialog(service: PhoneCloudSyncService, onAuthorized: (
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 when {
                     error != null -> Text(error!!)
-                    received -> Text("已授权，正在读取云端资料…")
+                    received -> CloudLoadingRow("已授权，正在读取云端资料…")
                     state.phase == CloudApprovalPhase.EXPIRED -> Text("请求已过期，请重新发起。")
                     state.phase == CloudApprovalPhase.CANCELLED -> Text("授权已取消。两边的码不一致时，请确认是你本人在操作后重新发起。")
                     state.code != null -> {
-                        Text(if (state.locallyConfirmed) "已核对，等待已登录设备完成授权…" else "请在已登录的手机或小程序上核对此码：")
+                        if (state.locallyConfirmed) CloudLoadingRow("已核对，等待已登录设备完成授权…")
+                        else Text("请在已登录的手机或小程序上核对此码：")
                         Text(
                             formatApprovalCode(state.code!!),
                             style = MaterialTheme.typography.displaySmall,
@@ -72,14 +74,21 @@ internal fun CloudApprovalDialog(service: PhoneCloudSyncService, onAuthorized: (
                         if (!state.locallyConfirmed) Text("两边完全一致时，请在两台设备上都点“一致”。",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    else -> Text("请在另一台已登录本账号的设备（手机 App 或微信小程序）上打开腕上RSS，稍等会弹出授权提示，按提示核对授权码。\n\n此页面请保持打开，5 分钟内有效。")
+                    else -> {
+                        Text("请在另一台已登录本账号的设备（手机 App 或微信小程序）上打开腕上RSS，稍等会弹出授权提示，按提示核对授权码。\n\n此页面请保持打开，5 分钟内有效。")
+                        CloudLoadingRow("正在等待已登录设备响应…")
+                    }
                 }
             }
         },
         confirmButton = {
-            if (comparing) TextButton(onClick = { scope.launch {
-                try { service.approvals.confirmMatches() } catch (e: CancellationException) { throw e } catch (_: Exception) { if (service.approvals.state.value.phase != CloudApprovalPhase.EXPIRED) error = "授权验证失败，请重新发起" }
-            } }) { Text("一致") }
+            if (comparing) TextButton(enabled = !confirming, onClick = {
+                confirming = true
+                scope.launch {
+                    try { service.approvals.confirmMatches() } catch (e: CancellationException) { throw e } catch (_: Exception) { if (service.approvals.state.value.phase != CloudApprovalPhase.EXPIRED) error = "授权验证失败，请重新发起" }
+                    finally { confirming = false }
+                }
+            }) { CloudButtonLabel("一致", "正在核对…".takeIf { confirming }) }
             else if (finished) TextButton(onClick = { service.approvals.clear(); onDismiss() }) { Text("关闭") }
         },
         dismissButton = {

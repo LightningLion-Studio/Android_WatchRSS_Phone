@@ -14,7 +14,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
@@ -153,7 +152,9 @@ internal fun CloudStorageResetScreen(
                                 Text("我已保存新的恢复词")
                             }
                         }
-                        CloudResetStep.RUNNING -> CircularProgressIndicator()
+                        CloudResetStep.RUNNING -> CloudLoadingRow(
+                            if (reconcile) "正在向服务器确认重置结果…" else "正在抹除云端内容并启用新的恢复词，请保持此页面打开。"
+                        )
                         CloudResetStep.SUCCESS -> Text("其他已登录的设备需要用新的恢复词重新加入。返回云同步页后，将开始上传本机待同步内容。")
                         CloudResetStep.RESULT -> Text(result)
                     }
@@ -178,7 +179,7 @@ internal fun CloudStorageResetScreen(
                                     } finally { preparing = false }
                                 }
                             }
-                        ) { Text("继续重置") }
+                        ) { CloudButtonLabel("继续重置", "正在生成恢复词…".takeIf { preparing }) }
                     }
                     CloudResetStep.WORDS -> {
                         Button(onClick = ::close, modifier = Modifier.fillMaxWidth()) { Text("取消") }

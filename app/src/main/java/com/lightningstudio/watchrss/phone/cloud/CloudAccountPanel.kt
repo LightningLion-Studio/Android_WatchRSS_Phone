@@ -93,6 +93,22 @@ fun CloudAccountPanel(
     var activationInFlight by remember(userId) { mutableStateOf(false) }
     var recordStatus by remember(userId) { mutableStateOf<LegacyCloudRecordStatus?>(null) }
     var recordConsentEpoch by remember(userId) { mutableStateOf<String?>(null) }
+    // Key of the action now running; its button shows a spinner. Recovery keeps its own stage text.
+    var work by remember(userId) { mutableStateOf<String?>(null) }
+    var recoverStage by remember(userId) { mutableStateOf<String?>(null) }
+
+    /** Marks the panel busy before the coroutine starts, so a second tap cannot start the same work. */
+    fun runWork(key: String, block: suspend () -> Unit) {
+        work = key
+        onBusyChange(true)
+        runAction {
+            try { block() } finally {
+                if (work == key) work = null
+                onBusyChange(false)
+            }
+        }
+    }
+    fun running(key: String, text: String): String? = text.takeIf { work == key }
 
     val refreshRequests = rememberCloudPaneRefresh(userId, refreshActive)
     var refreshError by remember(userId, syncState.lastCompletedAt) { mutableStateOf<String?>(null) }
@@ -147,8 +163,7 @@ fun CloudAccountPanel(
             text = { Text("同步订阅、收藏、稍后读、阅读进度、笔记和书籍状态。数据在本机加密；已有备份会保留。") },
             confirmButton = { TextButton(enabled = !busy, onClick = {
                 recordConsentEpoch = null
-                runAction {
-                    onBusyChange(true)
+                runWork("record-sync") {
                     try {
                         if (service.enableCloudRecordSync(true, userId, epoch)) {
                             recordStatus = LegacyCloudRecordStatus.ENABLED
@@ -156,7 +171,6 @@ fun CloudAccountPanel(
                         }
                     } catch (error: CancellationException) { throw error }
                     catch (error: Exception) { onError(error.message ?: "云端状态同步启用失败") }
-                    finally { onBusyChange(false) }
                 }
             }) { Text("同意并启用") } },
             dismissButton = { TextButton(enabled = !busy, onClick = { recordConsentEpoch = null }) { Text("取消") } }
@@ -170,12 +184,10 @@ fun CloudAccountPanel(
             text = { Text("将撤销服务器上本机的旧身份并重新登记，之后需使用恢复词或其他设备授权。") },
             confirmButton = { TextButton(enabled = !busy, onClick = {
                 showReregisterConfirmation = false
-                runAction {
-                    onBusyChange(true)
+                runWork("reregister") {
                     try { service.reregisterCurrentDevice(); refresh(); onMessage("本机已重新登记，请恢复或授权") }
                     catch (error: CancellationException) { throw error }
                     catch (error: Exception) { onError(error.message ?: "重新登记失败") }
-                    finally { onBusyChange(false) }
                 }
             }) { Text("确认重新登记") } },
             dismissButton = { TextButton(onClick = { showReregisterConfirmation = false }) { Text("取消") } }
@@ -196,7 +208,7 @@ fun CloudAccountPanel(
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         CloudSyncRoundNotice(usesSyncV2, syncState)
         SyncV2Section(service, userId)
-        refreshError?.let {
+        refreshError?.takeUnless { memberLoading }?.let {
             Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
         }
         Text("云空间", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
@@ -204,7 +216,9 @@ fun CloudAccountPanel(
         val keyWarning by service.keyWarning.collectAsState()
         val needsReapproval by service.needsReapproval.collectAsState()
         if (registrationConflict) {
-            OutlinedButton(enabled = !busy, onClick = { showReregisterConfirmation = true }) { Text("重新登记本机") }
+            OutlinedButton(enabled = !busy, onClick = { showReregisterConfirmation = true }) {
+                CloudButtonLabel("重新登记本机", running("reregister", "正在重新登记…"))
+            }
         }
         keyWarning?.let {
             Text(
@@ -215,9 +229,14 @@ fun CloudAccountPanel(
             )
         }
         if (member == null) {
-            Text(if (memberLoading) "正在读取会员状态…" else "暂时无法读取会员状态。")
-            if (usesSyncV2 && syncState.phase == CloudSyncPhase.ERROR && !roundTimedOut) {
-                Text(syncState.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            if (memberLoading) {
+                CloudLoadingRow("正在读取云同步状态…")
+            } else {
+                Text("暂时无法读取会员状态。")
+                if (usesSyncV2 && syncState.phase == CloudSyncPhase.ERROR && !roundTimedOut) {
+                    Text(syncState.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+                TextButton(onClick = { refresh() }, enabled = !busy) { Text("重新读取") }
             }
         } else if (!member.readable) {
             Text("暂时无法读取云空间，请刷新状态或重新登录。")
@@ -243,6 +262,8 @@ fun CloudAccountPanel(
                     enabled = !busy,
                     modifier = Modifier.fillMaxWidth()
                 ) { Text(if (showHistory) "收起历史快照" else "恢复历史快照") }
+                running("restore", "正在恢复快照…")?.let { CloudLoadingRow(it) }
+                running("delete-snapshot", "正在删除快照…")?.let { CloudLoadingRow(it) }
                 if (showHistory) {
                     Text("恢复历史快照", fontWeight = FontWeight.Medium)
                     Text(
@@ -251,8 +272,7 @@ fun CloudAccountPanel(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     if (historyLoading && snapshotHeads.isEmpty()) {
-                        Text("正在读取历史快照…", style = MaterialTheme.typography.bodySmall)
-                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        CloudLoadingRow("正在读取历史快照…")
                     } else if (snapshotHeads.isEmpty()) {
                         Text("暂无可恢复的历史快照")
                     }
@@ -273,18 +293,16 @@ fun CloudAccountPanel(
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     OutlinedButton(
                                         onClick = {
-                                            runAction {
-                                                onBusyChange(true)
+                                            runWork("inspect:${head.id}") {
                                                 runCatching { service.inspectSnapshot(head.id) }
                                                     .onSuccess { restorePreview = it }
                                                     .onFailure {
                                                         onError(it.message ?: "无法读取快照预览")
                                                     }
-                                                onBusyChange(false)
                                             }
                                         },
                                         enabled = !busy && service.hasLocalAccountKey()
-                                    ) { Text("切换 / 恢复") }
+                                    ) { CloudButtonLabel("切换 / 恢复", running("inspect:${head.id}", "正在读取…")) }
                                     TextButton(
                                         onClick = { deleteCandidate = head },
                                         enabled = !busy
@@ -307,19 +325,17 @@ fun CloudAccountPanel(
                 if (setup == null) {
                     Button(
                         onClick = {
-                            runAction {
-                                onBusyChange(true)
+                            runWork("prepare") {
                                 runCatching { service.prepareFirstDevice() }
                                     .onSuccess { setup = it }
                                     .onFailure { onError(it.message ?: "云备份启用失败") }
-                                onBusyChange(false)
                             }
                         },
                         enabled = !busy,
                         modifier = Modifier
                             .fillMaxWidth()
                             .tipAnchor(TipIds.CLOUD_E2EE)
-                    ) { Text("启用端到端加密云备份") }
+                    ) { CloudButtonLabel("启用端到端加密云备份", running("prepare", "正在生成恢复词…")) }
                 } else {
                     Card(modifier = Modifier.fillMaxWidth()) {
                         Column(
@@ -376,7 +392,8 @@ fun CloudAccountPanel(
                                 enabled = !busy && !activationInFlight &&
                                     RecoveryWords.parse(recoveryInput).size == 24,
                                 modifier = Modifier.fillMaxWidth()
-                            ) { Text("我已安全保存，正式启用") }
+                            ) { CloudButtonLabel("我已安全保存，正式启用", "正在启用…".takeIf { activationInFlight }) }
+                            if (activationInFlight) CloudLoadingRow("正在核对恢复词并登记本机…")
                             TextButton(
                                 onClick = { service.discardRecoverySetup(); setup = null; recoveryInput = "" },
                                 enabled = !activationInFlight,
@@ -394,37 +411,27 @@ fun CloudAccountPanel(
                 ) { Text("请已登录的设备批准") }
                 val bluetoothPaused = service.cloudResetBluetoothPaused(userId)
                 RecoveryDraftPrivacy(recoveryDraft, refreshActive, bluetoothPaused) {
-                    RecoveryInputPrivacy {
-                        OutlinedTextField(
-                            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Password),
-                            value = recoveryInput,
-                            onValueChange = { recoveryInput = it },
-                            label = { Text("24词恢复密钥") },
-                            minLines = 3,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
-                    Button(
-                        onClick = {
-                            runAction {
-                                onBusyChange(true)
-                                try {
-                                    val entropy = recoveryDraft.consumeEntropy()
-                                    try { service.recoverWithEntropy(entropy) } finally { entropy.fill(0) }
-                                    bootstrap = service.loadBootstrap()
-                                    onMessage("当前手机已获得解密能力")
-                                } catch (error: CancellationException) {
-                                    throw error
-                                } catch (error: Exception) {
-                                    onError(error.message ?: "恢复失败")
-                                } finally {
-                                    onBusyChange(false)
-                                }
+                    RecoveryUnlockForm(recoveryDraft, busy = busy, stage = recoverStage, onSubmit = submit@{
+                        if (recoverStage != null) return@submit
+                        recoverStage = RECOVERY_STAGE_DECRYPT
+                        onBusyChange(true)
+                        runAction {
+                            try {
+                                val entropy = recoveryDraft.consumeEntropy()
+                                try { service.recoverWithEntropy(entropy) } finally { entropy.fill(0) }
+                                recoverStage = RECOVERY_STAGE_LOAD
+                                bootstrap = service.loadBootstrap()
+                                onMessage("当前手机已获得解密能力")
+                            } catch (error: CancellationException) {
+                                throw error
+                            } catch (error: Exception) {
+                                onError(error.message ?: "恢复失败")
+                            } finally {
+                                recoverStage = null
+                                onBusyChange(false)
                             }
-                        },
-                        enabled = !busy && RecoveryWords.parse(recoveryInput).size == 24,
-                        modifier = Modifier.fillMaxWidth()
-                    ) { Text("使用恢复词授权此手机") }
+                        }
+                    })
                 }
                 if (service.cloudResetEntryAvailable(bootstrap, userId)) {
                     TextButton(enabled = !busy, onClick = onOpenCloudReset) {
@@ -447,7 +454,7 @@ fun CloudAccountPanel(
                             }) { Text("启用云端状态同步") }
                         }
                         LegacyCloudRecordStatus.ENABLED -> Text("✓ 云端状态同步已启用", color = MaterialTheme.colorScheme.primary)
-                        LegacyCloudRecordStatus.LOADING -> Text("正在读取云端状态同步…")
+                        LegacyCloudRecordStatus.LOADING -> CloudLoadingRow("正在读取云端状态同步…")
                         LegacyCloudRecordStatus.UNAVAILABLE -> Text("暂时无法读取云端状态同步。")
                         null -> Unit
                     }
@@ -502,8 +509,7 @@ fun CloudAccountPanel(
                     }
                     OutlinedButton(
                         onClick = {
-                            runAction {
-                                onBusyChange(true)
+                            runWork("rotate") {
                                 runCatching {
                                     service.rotateAccountKey(RecoveryWords.parse(recoveryInput))
                                 }.onSuccess { version ->
@@ -512,12 +518,11 @@ fun CloudAccountPanel(
                                     try { service.syncNow(manual = true, expectedUserId = userId) }
                                     catch (_: Exception) { onMessage("密钥已轮换，后续同步暂未完成，请稍后重试同步") }
                                 }.onFailure { onError(it.message ?: "密钥轮换失败") }
-                                onBusyChange(false)
                             }
                         },
                         enabled = !busy && RecoveryWords.parse(recoveryInput).size == 24,
                         modifier = Modifier.fillMaxWidth()
-                    ) { Text("轮换账号加密密钥") }
+                    ) { CloudButtonLabel("轮换账号加密密钥", running("rotate", "正在轮换密钥…")) }
                 }
 
                 if (usesSyncV2) {
@@ -541,19 +546,21 @@ fun CloudAccountPanel(
                 } else {
                     Button(
                         onClick = {
-                            runAction {
-                                onBusyChange(true)
+                            runWork("estimate") {
                                 runCatching { service.estimateManualSync() }
                                     .onSuccess { estimate = it }
                                     .onFailure { onError(it.message ?: "无法估算同步流量") }
-                                onBusyChange(false)
                             }
                         },
                         enabled = !busy,
                         modifier = Modifier.fillMaxWidth()
-                    ) { Text("立即同步") }
+                    ) {
+                        CloudButtonLabel("立即同步", running("estimate", "正在估算流量…") ?: running("sync", "正在同步…"))
+                    }
                 }
-                if (!usesSyncV2 || (syncState.phase != CloudSyncPhase.BLOCKED && !roundTimedOut)) {
+                if (syncState.phase in CLOUD_ROUND_RUNNING) {
+                    CloudLoadingRow(syncState.message.ifBlank { "正在同步…" })
+                } else if (!usesSyncV2 || (syncState.phase != CloudSyncPhase.BLOCKED && !roundTimedOut)) {
                     Text(
                         syncState.message.ifBlank { "等待同步" },
                         style = MaterialTheme.typography.bodySmall,
@@ -571,7 +578,13 @@ fun CloudAccountPanel(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text("设备授权", fontWeight = FontWeight.Medium)
-                    TextButton(onClick = { refresh() }, enabled = !busy) { Text("刷新") }
+                    TextButton(onClick = { refresh() }, enabled = !busy && !memberLoading) {
+                        CloudButtonLabel("刷新", "刷新中".takeIf { memberLoading })
+                    }
+                }
+                if (bootstrap == null) {
+                    if (memberLoading) CloudLoadingRow("正在读取设备列表…")
+                    else if (refreshActive) Text("暂时无法读取设备列表，请点刷新。", style = MaterialTheme.typography.bodySmall)
                 }
                 bootstrap?.devices?.filter { it.revokedAt == null && !it.deviceId.startsWith("reader-migration-") }?.forEach { device ->
                     val hasEnvelope = bootstrap!!.keyEnvelopes.any {
@@ -590,36 +603,38 @@ fun CloudAccountPanel(
                             else if (!hasEnvelope && device.publicKeySpki.isNotBlank()) {
                                 Button(
                                     onClick = {
-                                        runAction {
-                                            onBusyChange(true)
+                                        runWork("approve:${device.deviceId}") {
                                             runCatching {
                                                 service.approveDevice(device.deviceId)
                                                 bootstrap = service.loadBootstrap()
                                             }.onSuccess { onMessage("已补发密钥") }
                                                 .onFailure { onError(it.message ?: "设备授权失败") }
-                                            onBusyChange(false)
                                         }
                                     },
                                     enabled = !busy
-                                ) { Text("补发密钥") }
+                                ) { CloudButtonLabel("补发密钥", running("approve:${device.deviceId}", "正在补发…")) }
                             }
                             TextButton(
                                 onClick = {
-                                    runAction {
-                                        onBusyChange(true)
+                                    runWork("revoke:${device.deviceId}") {
                                         runCatching {
                                             service.revokeDevice(device.deviceId)
                                             bootstrap = service.loadBootstrap()
                                         }.onSuccess { onMessage("设备已撤销") }
                                             .onFailure { onError(it.message ?: "设备撤销失败") }
-                                        onBusyChange(false)
                                     }
                                 },
                                 enabled = !busy
-                            ) { Text("撤销设备") }
+                            ) { CloudButtonLabel("撤销设备", running("revoke:${device.deviceId}", "正在撤销…")) }
                         }
                     }
                 }
+            } else if (memberLoading) {
+                // Key material, recovery envelopes and this phone's registration come from bootstrap.
+                CloudLoadingRow("正在读取解密状态…")
+            } else if (refreshActive) {
+                Text("暂时无法读取解密状态。")
+                TextButton(onClick = { refresh() }, enabled = !busy) { Text("重新读取") }
             }
             if (!usesSyncV2 && recoveryEnvelopeExists) {
                 OutlinedButton(
@@ -693,10 +708,7 @@ fun CloudAccountPanel(
                         enabled = !busy,
                         modifier = Modifier.fillMaxWidth()
                     )
-                    if (busy) {
-                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                        Text("正在永久删除云端库，请勿关闭页面")
-                    }
+                    if (work == "reset") CloudLoadingRow("正在永久删除云端库，请勿关闭页面")
                     resetError?.let { visibleError ->
                         Text(
                             visibleError,
@@ -711,8 +723,7 @@ fun CloudAccountPanel(
                     onClick = {
                         val confirmation = resetConfirmationInput
                         resetError = null
-                        runAction {
-                            onBusyChange(true)
+                        runWork("reset") {
                             runCatching { service.resetCloudLibrary(confirmation) }
                                 .onSuccess { result ->
                                     showResetConfirmation = false
@@ -741,14 +752,13 @@ fun CloudAccountPanel(
                                     resetError = visibleError
                                     onError(visibleError)
                                 }
-                            onBusyChange(false)
                         }
                     },
                     enabled = !busy && isCloudLibraryDeleteConfirmed(resetConfirmationInput),
                     colors = ButtonDefaults.textButtonColors(
                         contentColor = MaterialTheme.colorScheme.error
                     )
-                ) { Text("永久删除") }
+                ) { CloudButtonLabel("永久删除", running("reset", "正在删除…")) }
             },
             dismissButton = {
                 TextButton(
@@ -777,8 +787,7 @@ fun CloudAccountPanel(
                 TextButton(onClick = {
                     estimate = null
                     stopRefresh()
-                    runAction {
-                        onBusyChange(true)
+                    runWork("sync") {
                         try {
                             if (service.syncNow(manual = true, expectedUserId = userId).completed) {
                                 bootstrap = service.loadBootstrap(userId)
@@ -788,8 +797,6 @@ fun CloudAccountPanel(
                             throw error
                         } catch (error: Exception) {
                             onError(error.message ?: "云同步失败")
-                        } finally {
-                            onBusyChange(false)
                         }
                     }
                 }) { Text("继续同步") }
@@ -816,8 +823,7 @@ fun CloudAccountPanel(
             confirmButton = {
                 TextButton(onClick = {
                     restorePreview = null
-                    runAction {
-                        onBusyChange(true)
+                    runWork("restore") {
                         runCatching {
                             service.restoreSnapshot(preview.snapshotId, BackupImportMode.MERGE)
                         }.onSuccess { result ->
@@ -827,7 +833,6 @@ fun CloudAccountPanel(
                                     "状态 ${result.rssStatesApplied}"
                             )
                         }.onFailure { onError(it.message ?: "快照恢复失败") }
-                        onBusyChange(false)
                     }
                 }) { Text("合并恢复") }
             },
@@ -855,15 +860,13 @@ fun CloudAccountPanel(
             confirmButton = {
                 TextButton(onClick = {
                     overwriteConfirm = null
-                    runAction {
-                        onBusyChange(true)
+                    runWork("restore") {
                         runCatching {
                             service.restoreSnapshot(preview.snapshotId, BackupImportMode.REPLACE)
                         }.onSuccess {
                             refresh()
                             onMessage("覆盖恢复完成，本地安全快照已保留")
                         }.onFailure { onError(it.message ?: "覆盖恢复失败") }
-                        onBusyChange(false)
                     }
                 }) { Text("确认覆盖") }
             },
@@ -881,15 +884,13 @@ fun CloudAccountPanel(
             confirmButton = {
                 TextButton(onClick = {
                     deleteCandidate = null
-                    runAction {
-                        onBusyChange(true)
+                    runWork("delete-snapshot") {
                         runCatching { service.deleteSnapshot(head.id) }
                             .onSuccess {
                                 refresh()
                                 onMessage("云快照已删除")
                             }
                             .onFailure { onError(it.message ?: "删除快照失败") }
-                        onBusyChange(false)
                     }
                 }) { Text("删除") }
             },
@@ -921,6 +922,41 @@ internal fun RecoveryWordsDisplay(words: List<String>, clipboard: RecoveryWordCl
         enabled = enabled,
         modifier = Modifier.fillMaxWidth()
     ) { Text("复制恢复词") }
+}
+
+internal const val RECOVERY_STAGE_DECRYPT = "正在解密恢复密钥并登记本机…"
+internal const val RECOVERY_STAGE_LOAD = "已解密，正在读取云端资料…"
+
+/** Phases in which a sync round is actively working, so the status line carries a spinner. */
+internal val CLOUD_ROUND_RUNNING = setOf(
+    CloudSyncPhase.CHECKING, CloudSyncPhase.DOWNLOADING, CloudSyncPhase.MERGING, CloudSyncPhase.UPLOADING
+)
+
+/**
+ * 24-word unlock. While [stage] is set the field and button lock, the button shows a compact
+ * spinner and the stage line below says which step is running. The caller clears the draft
+ * when it consumes the words; this form never copies them.
+ */
+@Composable
+internal fun RecoveryUnlockForm(draft: RecoveryInputDraft, busy: Boolean, stage: String?, onSubmit: () -> Unit) {
+    var input by draft.text
+    RecoveryInputPrivacy {
+        OutlinedTextField(
+            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Password),
+            value = input,
+            onValueChange = { input = it },
+            label = { Text("24词恢复密钥") },
+            enabled = stage == null,
+            minLines = 3,
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
+    Button(
+        onClick = { if (stage == null) onSubmit() },
+        enabled = !busy && stage == null && RecoveryWords.parse(input).size == 24,
+        modifier = Modifier.fillMaxWidth()
+    ) { CloudButtonLabel("使用恢复词授权此手机", "正在解密…".takeIf { stage != null }) }
+    stage?.let { CloudLoadingRow(it) }
 }
 
 internal enum class LegacyCloudRecordStatus { LOADING, ENABLED, DISABLED, UNAVAILABLE }

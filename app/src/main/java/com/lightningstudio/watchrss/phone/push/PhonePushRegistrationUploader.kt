@@ -2,6 +2,7 @@ package com.lightningstudio.watchrss.phone.push
 
 import android.util.Log
 import com.lightningstudio.watchrss.phone.account.AccountEnvironment
+import com.lightningstudio.watchrss.phone.account.LicenseDeviceIdentity
 import com.lightningstudio.watchrss.phone.account.PhoneAccountRepository
 import com.lightningstudio.watchrss.phone.network.withWatchRssAppVersionHeader
 import okhttp3.MediaType.Companion.toMediaType
@@ -22,7 +23,7 @@ class PhonePushRegistrationUploader(
     private val accountRepository: PhoneAccountRepository,
     private val deviceAccessTokenProvider: () -> String?,
     private val installId: String,
-    private val deviceId: String,
+    private val licenseDeviceIdentity: LicenseDeviceIdentity,
     private val httpClient: OkHttpClient = defaultHttpClient()
 ) {
     /** Returns true only when the backend accepted the registration. Never throws. */
@@ -32,7 +33,7 @@ class PhonePushRegistrationUploader(
         val deviceToken = deviceAccessTokenProvider()?.takeIf { it.isNotBlank() } ?: return false
         val payload = JSONObject().apply {
             put("registrationId", regId)
-            put("deviceId", deviceId)
+            put("deviceId", licenseDeviceIdentity.deviceId)
             put("installId", installId)
         }
         val request = Request.Builder()
@@ -44,14 +45,24 @@ class PhonePushRegistrationUploader(
             .build()
         return try {
             httpClient.newCall(request).execute().use { response ->
-                if (response.isSuccessful) {
-                    true
-                } else {
-                    accountRepository.recordAuthenticationResponse(session.userId, response.code,
-                        if (response.code in setOf(401, 403)) "" else response.peekBody(4096).string())
-                    Log.w(TAG, "push-registration rejected: HTTP ${response.code}")
-                    false
+                if (response.isSuccessful) return true
+
+                // This refusal describes the registration payload. The device session may still be valid.
+                val deviceMismatch = response.code == 403 && runCatching {
+                    JSONObject(response.peekBody(4096).string()).optString("error") == "device_mismatch"
+                }.getOrDefault(false)
+                if (deviceMismatch) {
+                    Log.w(TAG, "push-registration rejected: HTTP 403 device_mismatch")
+                    return false
                 }
+
+                accountRepository.recordAuthenticationResponse(
+                    session.userId,
+                    response.code,
+                    if (response.code in setOf(401, 403)) "" else response.peekBody(4096).string()
+                )
+                Log.w(TAG, "push-registration rejected: HTTP ${response.code}")
+                false
             }
         } catch (error: Exception) {
             Log.w(TAG, "push-registration upload failed", error)

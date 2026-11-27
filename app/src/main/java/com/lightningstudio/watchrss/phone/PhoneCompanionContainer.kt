@@ -128,7 +128,7 @@ class PhoneCompanionContainer(context: Context) {
             accountRepository = accountRepository,
             deviceAccessTokenProvider = { appAccessCoordinator.deviceAccessToken },
             installId = installationIdentity.installId,
-            deviceId = deviceIdentity.deviceId
+            licenseDeviceIdentity = licenseDeviceIdentity
         )
     }
 

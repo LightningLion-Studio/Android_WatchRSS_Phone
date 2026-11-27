@@ -14,6 +14,8 @@ import org.json.JSONArray
 import java.io.*
 import okio.buffer
 import com.lightningstudio.watchrss.phone.cloud.CloudKeyManager
+import com.lightningstudio.watchrss.phone.push.PhonePushRegistrationUploader
+import com.lightningstudio.watchrss.phone.data.local.PhoneDeviceIdentity
 import kotlinx.coroutines.*
 import okhttp3.Protocol
 import okhttp3.Response
@@ -527,13 +529,61 @@ class OfflineBluetoothReviewTest {
             assertNull(sessionStore.bluetoothGrant(grantKey()));assertNotNull(sessionStore.bluetoothGrant(grantKey(owner="other-owner")))
         } finally {release.countDown()}
     }
+    @Test fun pushRegistrationUsesTheDeviceIdOfTheAuthorization() = runBlocking<Unit> {
+        seedCache()
+        var request: okhttp3.Request? = null
+        val http = okhttp3.OkHttpClient.Builder().addInterceptor { chain ->
+            request = chain.request()
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
+                .code(200).message("accepted").body("{}".toResponseBody()).build()
+        }.build()
+        val uploader = PhonePushRegistrationUploader(
+            AccountEnvironment(backendBaseUrl = origin, supabaseAnonKey = "synthetic"),
+            repo, { coordinator.deviceAccessToken }, "install", identity, http
+        )
+
+        assertTrue(uploader.upload("synthetic-registration"))
+        val sent = requireNotNull(request)
+        val body = okio.Buffer().also { requireNotNull(sent.body).writeTo(it) }
+        val payload = JSONObject(body.readUtf8())
+        assertEquals(identity.deviceId, payload.getString("deviceId"))
+        assertNotEquals(PhoneDeviceIdentity(context).deviceId, payload.getString("deviceId"))
+        assertEquals("synthetic-registration", payload.getString("registrationId"))
+        assertEquals("install", payload.getString("installId"))
+        assertEquals("Bearer device", sent.header("x-watchrss-device-authorization"))
+    }
+
+    @Test fun pushRegistrationDeviceMismatchPreservesAuthorizationAndBluetoothGrant() = runBlocking<Unit> {
+        seedCache()
+        val grant = requireNotNull(sessionStore.bluetoothGrant(grantKey())).toString()
+        val version = repo.offlineAuthorizationVersion("owner")
+        val requestsBefore = networkCalls
+        val http = okhttp3.OkHttpClient.Builder().addInterceptor { chain ->
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
+                .code(403).message("refused")
+                .body("""{"error":"device_mismatch","detail":null}""".toResponseBody()).build()
+        }.build()
+        val uploader = PhonePushRegistrationUploader(
+            AccountEnvironment(backendBaseUrl = origin, supabaseAnonKey = "synthetic"),
+            repo, { coordinator.deviceAccessToken }, "install", identity, http
+        )
+
+        assertFalse(uploader.upload("synthetic-registration"))
+        assertFalse(repo.offlineAuthorizationBlocked("owner"))
+        assertEquals(version, repo.offlineAuthorizationVersion("owner"))
+        assertEquals(grant, sessionStore.bluetoothGrant(grantKey()).toString())
+        assertNull(repo.reauthenticationOwner.value)
+        assertEquals("device", coordinator.deviceAccessToken)
+        assertEquals(requestsBefore, networkCalls)
+    }
+
     @Test fun pushRegistrationRefusalUsesTheSamePersistentGate()=runBlocking<Unit> {
         seedCache()
         val http=okhttp3.OkHttpClient.Builder().addInterceptor {chain->
             Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(403).message("refused").body("{}".toResponseBody()).build()
         }.build()
-        val uploader=com.lightningstudio.watchrss.phone.push.PhonePushRegistrationUploader(
-            AccountEnvironment(backendBaseUrl=origin,supabaseAnonKey="synthetic"),repo,{"device"},"install","phone",http)
+        val uploader = PhonePushRegistrationUploader(
+            AccountEnvironment(backendBaseUrl=origin,supabaseAnonKey="synthetic"),repo,{"device"},"install",identity,http)
         assertFalse(uploader.upload("synthetic-registration"))
         assertTrue(repo.offlineAuthorizationBlocked("owner"));assertNull(sessionStore.bluetoothGrant(grantKey()))
         noDataOrReconnect()

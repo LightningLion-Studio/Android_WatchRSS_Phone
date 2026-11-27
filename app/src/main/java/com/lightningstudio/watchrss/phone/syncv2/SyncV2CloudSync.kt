@@ -73,6 +73,8 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         val closure=SyncV2ControlClosure(identity,authors,contentKey,client.noteSegmentsRead())
         val verified=projection.verifyCloud(closure,headers.first(),{oid->client.raw(oid,id)},{ parent ->
             client.reference(parent,id).let { JSONObject(it.toString()).apply { remove("version") } }
+        },SyncV2ControlFetch.Remote({oids->client.batch(id,oids)}){parents->
+            client.references(parents,id).mapValues{(_,v)->v?.let{JSONObject(it.toString()).apply{remove("version")}}}
         })
         verified.use {
         fresh(window)
@@ -148,7 +150,9 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         // Without an authenticated operation base, a differing local row cannot overwrite a cloud row.
         // Missing local rows are retained from cloud, never interpreted as deletions.
         val mergedRows=SyncV2Index.read(identity.scope,localIndex.tree.root,localIndex.objects::getValue).associateBy{it.getString("entityKey")}.toMutableMap()
-        val mergedObjects=projection.objectSpool().apply{putAll(projection.cloudObjects());putAll(localIndex.objects)}
+        // A1: one OID has one byte sequence. Do not read and write an object that is already staged.
+        val cloudObjects=projection.cloudObjects()
+        val mergedObjects=projection.objectSpool().apply{putAll(cloudObjects);for(oid in localIndex.objects.keys)if(!containsKey(oid))put(oid,localIndex.objects.getValue(oid))}
         try {
         val newRefs=localIndex.refs.toMutableList()
         for(cloud in projection.cloudRows()) {
@@ -240,7 +244,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         val signed=signer.commit(body);val oid=SyncV2Codec.oid("commit",body)
         val objects=mergedObjects;objects.retain(reachable);objects[oid]=SyncV2Codec.utf8(SyncV2Codec.canonical(signed))
         // Each reservation is bounded. Control upload never requests a content slot.
-        val currentOids=projection.cloudObjects().keys
+        val currentOids=cloudObjects.keys
         val toUpload=objects.entries.filter{it.key !in currentOids && it.key.substringBefore(':') in setOf("meta","state","tree","commit")}.sortedBy{it.key}
         for(batch in toUpload.chunked(64)) {
             val reserve=client.reserve(randomId(),batch.map{it.key to it.value.size});val reservation=reserve.getString("reservationId")

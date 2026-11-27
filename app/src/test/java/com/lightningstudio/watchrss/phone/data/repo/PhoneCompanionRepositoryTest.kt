@@ -2194,6 +2194,43 @@ class PhoneCompanionRepositoryTest {
     }
 
     @Test
+    fun reorderContentChannels_changesOrderWithoutArticleBodyLoadOrFullRowWrite() = runBlocking {
+        val rss = source(url = "https://example.com/feed.xml", updatedAt = 10L)
+        val other = source(url = "https://example.com/other.xml", updatedAt = 20L)
+        val sourceDao = FakePhoneRssSourceDao().apply { sources = listOf(rss, other) }
+        val articleDao = FakePhoneArticleDao().apply {
+            items = listOf(
+                article(id = "independent-1", independentSaved = true, independentChangedAt = 5L),
+                article(id = "independent-2", independentSaved = true, independentChangedAt = 4L)
+            )
+        }
+        val before = articleDao.items.associateBy { it.articleId }
+        val repository = PhoneCompanionRepository(
+            savedItemDao = FakePhoneSavedItemDao(),
+            articleDao = articleDao,
+            rssSourceDao = sourceDao,
+            deviceId = "test-phone"
+        )
+
+        repository.reorderContentChannels(
+            sourceUrlsInDisplayOrder = listOf(other.url, rss.url),
+            independentIndex = 0
+        )
+
+        assertEquals(0, articleDao.fullLoads)
+        assertEquals(0, articleDao.upserts)
+        for (updated in articleDao.items) {
+            val old = before.getValue(updated.articleId)
+            assertTrue(updated.independentSortOrder > sourceDao.sources.maxOf { it.sortOrder })
+            assertEquals(
+                old.copy(sourceDeviceId = "test-phone", independentChangedAt = updated.independentChangedAt,
+                    independentSortOrder = updated.independentSortOrder),
+                updated
+            )
+        }
+    }
+
+    @Test
     fun reorderContentChannels_reordersPinnedSourcesWithinPinnedGroup() = runBlocking {
         val pinnedFirst = source(
             url = "https://example.com/first.xml",
@@ -2847,7 +2884,16 @@ class PhoneCompanionRepositoryTest {
 
         override fun observeById(articleId: String): Flow<PhoneArticleEntity?> = emptyFlow()
 
-        override suspend fun getAllForSync(): List<PhoneArticleEntity> = items
+        var fullLoads = 0
+        var upserts = 0
+        override suspend fun getAllForSync(): List<PhoneArticleEntity> = items.also { fullLoads++ }
+        override suspend fun hasIndependentSaved() = items.any { it.independentSaved && !it.deleted }
+        override suspend fun updateIndependentOrder(articleId: String, sourceDeviceId: String, changedAt: Long, sortOrder: Long) {
+            items = items.map {
+                if (it.articleId != articleId) it else it.copy(sourceDeviceId = sourceDeviceId,
+                    independentChangedAt = changedAt, independentSortOrder = sortOrder, deleted = false)
+            }
+        }
 
         override suspend fun getAllIds(): List<String> = items.map { it.articleId }
 
@@ -2918,6 +2964,7 @@ class PhoneCompanionRepositoryTest {
         }
 
         override suspend fun upsert(article: PhoneArticleEntity) {
+            upserts++
             items = items.filterNot { it.articleId == article.articleId } + article
         }
 

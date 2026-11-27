@@ -303,7 +303,19 @@ internal class SyncV2Projection(
     }
     /** Authenticate and stage one note at a time. The round retains descriptors only. */
     internal fun verifyCloud(closure:SyncV2ControlClosure,envelope:JSONObject,get:(String)->ByteArray,
-        reference:(String)->JSONObject):SyncV2ControlClosure.Verified {
+        reference:(String)->JSONObject,remote:SyncV2ControlFetch.Remote?=null):SyncV2ControlClosure.Verified {
+        if(remote==null)return verifyCloud(closure,envelope,get,reference,null as SyncV2ControlFetch?)
+        val fetch=SyncV2ControlFetch(db,scope,::seal,::open,get,reference,remote)
+        return try{verifyCloud(closure,envelope,get,reference,fetch)}catch(e:IllegalStateException) {
+            // A cached mapping is a locator, not an authority. Ask the server before the round fails.
+            if(fetch.cachedMappings==0||e.message=="budget_paused")throw e
+            fetch.dropMappings()
+            verifyCloud(closure,envelope,get,reference,SyncV2ControlFetch(db,scope,::seal,::open,get,reference,remote,false))
+        }
+    }
+    private fun verifyCloud(closure:SyncV2ControlClosure,envelope:JSONObject,directGet:(String)->ByteArray,
+        directReference:(String)->JSONObject,fetch:SyncV2ControlFetch?):SyncV2ControlClosure.Verified {
+        val get=fetch?.let{it::get}?:directGet;val reference=fetch?.let{it::reference}?:directReference
         val objects=SyncV2Spool(db);val bodies=SyncV2Spool(db)
         try {
             val verified=closure.verifyStaged(envelope,get,reference,stage={staged->
@@ -314,7 +326,7 @@ internal class SyncV2Projection(
             objects.putAll(verified.objects)
             val rows=verified.rows.mapRows{r->if(r.optBoolean(SyncV2NoteWiring.PULL_STAGED_KEY))
                 open("cloud-row",bodies.getValue(r.getJSONObject("meta").getString("entityKey"))) else r}
-            return SyncV2ControlClosure.Verified.create(verified.commitOid,rows,objects){bodies.close();objects.close()}
+            return SyncV2ControlClosure.Verified.create(verified.commitOid,rows,objects){bodies.close();objects.close();if(fetch!=null)SyncV2ControlFetch.settle(db,scope)}
         } catch(e:Throwable) {bodies.close();objects.close();throw e}
     }
     /** P2 owns only current authenticated control content; never sends business applied ACK. */
@@ -1710,8 +1722,11 @@ internal class SyncV2Projection(
         fault("before-log")
         db.execSQL("INSERT OR IGNORE INTO syncv2_change_log VALUES(?,?,?)",arrayOf(scope,revision,entity))
         fault("after-log")
-        if(enqueue)db.execSQL("INSERT INTO syncv2_outbox(scope,revision,table_name,logical_id,operation,base_state) VALUES(?,?,?,?,?,?)",arrayOf(scope,revision,d.table,id2,"OBSERVE",seal("state",sourceState?:JSONObject())))
+        if(enqueue)db.execSQL("INSERT INTO syncv2_outbox(scope,revision,table_name,logical_id,operation,base_state) VALUES(?,?,?,?,?,?)",arrayOf(scope,revision,d.table,id2,"OBSERVE",seal("state",outboxBase(sourceState))))
     }
+    /** A2: readers of base_state use `account` only. Do not seal the complete state for each row.
+     * A record that an earlier version wrote holds the complete state and reads the same way. */
+    private fun outboxBase(sourceState:JSONObject?)=JSONObject().also{base->sourceState?.optJSONObject("account")?.let{base.put("account",it)}}
     private fun forkTitle(title:String,forkId:String):String {
         val existing=db.controlQuery("SELECT title FROM notes WHERE noteId=?",arrayOf(forkId)).use{if(it.moveToFirst())it.getString(0)else null}
         if(existing!=null)return existing

@@ -456,7 +456,7 @@ class HomeActivity : ComponentActivity() {
         super.onResume()
         val manager = (application as PhoneCompanionApplication).container.appStorageManager
         lifecycleScope.launch {
-            runCatching { manager.calculate().totalBytes }
+            runCatching { manager.totalBytes() }
                 .onSuccess { storageUsedBytes.value = it }
         }
         (appUpdateDownloader.state.value as? AppUpdateState.Ready)?.let { ready ->

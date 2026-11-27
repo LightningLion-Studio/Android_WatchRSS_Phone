@@ -8,7 +8,12 @@ import com.lightningstudio.watchrss.phone.cloud.CloudHeadDeviceSessionRejected
 import com.lightningstudio.watchrss.phone.cloud.isRefreshableCloudDeviceSessionError
 import com.lightningstudio.watchrss.phone.network.CloudCallCancellation
 import com.lightningstudio.watchrss.phone.network.limitToDeadline
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asContextElement
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.runBlocking
 import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -335,6 +340,20 @@ internal class SyncV2CloudClient(
         val type=parent.substringBefore(':');if(type !in setOf("state","recipe"))SyncV2Codec.fail("invalid_oid")
         return get("$type-refs/$parent",mapOf("windowId" to window))
     }
+    /** Mappings have no batch endpoint. A few workers read them under this round's deadline and
+     * cancellation. A missing mapping is null; the single read then reports it to the verifier. */
+    fun references(parents:List<String>,window:String):Map<String,JSONObject?> {
+        if(parents.size<2)return parents.associateWith{referenceOrNull(it,window)}
+        val context=bodyUploadContext();val workers=minOf(REFERENCE_CONCURRENCY,parents.size)
+        val out=java.util.concurrent.ConcurrentHashMap<String,JSONObject>()
+        runBlocking {
+            List(workers){worker->async(Dispatchers.IO+context) {
+                for(i in worker until parents.size step workers){ensureActive();referenceOrNull(parents[i],window)?.let{out[parents[i]]=it}}
+            }}.awaitAll()
+        }
+        return parents.associateWith{out[it]}
+    }
+    private fun referenceOrNull(parent:String,window:String)=try{reference(parent,window)}catch(e:SyncV2CloudError){if(e.code in setOf("object_missing","not_found"))null else throw e}
     fun raw(oid:String,window:String?=null):ByteArray { SyncV2Wire.oid(oid);return bytes("GET","objects/$oid",query=if(window==null)emptyMap()else mapOf("windowId" to window),raw=true).first }
     fun batch(window:String,oids:List<String>)=post("objects/batch-get",JSONObject().put("windowId",window).put("oids",JSONArray(oids)))
     fun objects(window:String,oids:List<String>):Map<String,ByteArray> {
@@ -410,6 +429,7 @@ internal class SyncV2CloudClient(
     companion object {
         // Parallel body uploads carry this scope and the execution deadline to each worker.
         private val roundCancellation = ThreadLocal<CloudCallCancellation>()
+        private const val REFERENCE_CONCURRENCY = 6
 
         suspend fun <T> runCancellable(work: () -> T): T = CloudCallCancellation.run { cancellation ->
             roundCancellation.set(cancellation)

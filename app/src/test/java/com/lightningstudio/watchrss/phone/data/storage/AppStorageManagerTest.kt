@@ -30,4 +30,25 @@ class AppStorageManagerTest {
         assertFalse(variant.exists())
         assertEquals(before,CloudExportFileWitness.observe(root))
     }
+    @Test fun summaryTotalUsesTheRecentResultUntilTheIntervalEndsOrACleanupChangesIt()=runBlocking {
+        val context:Context=RuntimeEnvironment.getApplication()
+        var now=1_000L
+        val manager=AppStorageManager(context){now}
+        val file=File(context.filesDir,"a4-total.bin")
+        file.writeBytes(ByteArray(1000))
+        val first=manager.totalBytes()
+        file.writeBytes(ByteArray(5000))
+        now+=AppStorageManager.TOTAL_REFRESH_INTERVAL_MILLIS-1
+        assertEquals(first,manager.totalBytes())
+        now+=1
+        assertEquals(first+4000,manager.totalBytes())
+        file.writeBytes(ByteArray(1000))
+        assertEquals(first+4000,manager.totalBytes())
+        // A full calculation and a cleanup always replace the summary value.
+        assertEquals(first,manager.calculate().totalBytes)
+        assertEquals(first,manager.totalBytes())
+        file.writeBytes(ByteArray(3000))
+        manager.clearCache()
+        assertEquals(first+2000,manager.totalBytes())
+    }
 }

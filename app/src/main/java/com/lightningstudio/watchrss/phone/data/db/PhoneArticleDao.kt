@@ -442,6 +442,16 @@ interface PhoneArticleDao {
     @Upsert
     suspend fun upsert(article: PhoneArticleEntity)
 
+    @Query("SELECT EXISTS(SELECT 1 FROM phone_articles WHERE independentSaved = 1 AND deleted = 0)")
+    suspend fun hasIndependentSaved(): Boolean
+
+    /** Writes the columns that a channel reorder changes. The article body is not read or written. */
+    @Query(
+        """UPDATE phone_articles SET sourceDeviceId = :sourceDeviceId, independentChangedAt = :changedAt,
+        independentSortOrder = :sortOrder, deleted = 0 WHERE articleId = :articleId"""
+    )
+    suspend fun updateIndependentOrder(articleId: String, sourceDeviceId: String, changedAt: Long, sortOrder: Long)
+
     @Upsert
     suspend fun upsertAll(articles: List<PhoneArticleEntity>)
 

@@ -59,6 +59,7 @@ internal object SyncV2Schema {
                 "CREATE TABLE IF NOT EXISTS syncv2_note_forks(scope TEXT NOT NULL,entity_key TEXT NOT NULL,fork_logical_id TEXT NOT NULL,PRIMARY KEY(scope,entity_key))",
                 "CREATE TABLE IF NOT EXISTS syncv2_note_bindings(scope TEXT NOT NULL,entity_key TEXT NOT NULL,note_revision TEXT,deleted INTEGER NOT NULL DEFAULT 0,invalidated INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(scope,entity_key))",
                 "CREATE TABLE IF NOT EXISTS syncv2_cloud_objects(scope TEXT NOT NULL,oid TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(scope,oid))",
+                "CREATE TABLE IF NOT EXISTS syncv2_verify_cache(scope TEXT NOT NULL,key TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(scope,key))",
                 "CREATE TABLE IF NOT EXISTS syncv2_wire_candidates(scope TEXT NOT NULL,entity_key TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(scope,entity_key))",
                 "CREATE TABLE IF NOT EXISTS syncv2_control(id INTEGER PRIMARY KEY CHECK(id=1),enabled INTEGER NOT NULL,library_id TEXT NOT NULL,active_scope TEXT,failure_code TEXT)",
                 "CREATE TABLE IF NOT EXISTS syncv2_reset_pending(scope TEXT NOT NULL,kind TEXT NOT NULL,logical_id TEXT NOT NULL,revision_hash TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(scope,kind,logical_id,revision_hash))",

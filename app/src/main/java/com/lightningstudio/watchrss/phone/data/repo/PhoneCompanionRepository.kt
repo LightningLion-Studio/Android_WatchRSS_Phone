@@ -800,7 +800,7 @@ class PhoneCompanionRepository(
         if (independentIndex != null && requestedSources.any { it.isPinned }) return
         val now = System.currentTimeMillis()
         val hasIndependentArticles = independentIndex != null &&
-            articleDao.getAllForSync().any { it.independentSaved && !it.deleted }
+            articleDao.hasIndependentSaved()
         val itemCount = orderedUrls.size + if (hasIndependentArticles) 1 else 0
         if (itemCount < 2) return
         val normalizedIndependentIndex = if (hasIndependentArticles) {
@@ -834,7 +834,8 @@ class PhoneCompanionRepository(
     }
 
     private suspend fun reorderIndependentArticles(rowSortOrder: Long, changedAt: Long) {
-        val articles = articleDao.getAllForSync()
+        // The order needs metadata only. Do not load each article body.
+        val articles = articleDao.getAllMetadataForSync()
             .filter { it.independentSaved && !it.deleted }
             .sortedWith(
                 compareByDescending<PhoneArticleEntity> { it.independentSortOrder }
@@ -852,7 +853,9 @@ class PhoneCompanionRepository(
                 deleted = false
             )
             if (updated != article) {
-                articleDao.upsert(updated)
+                articleDao.updateIndependentOrder(
+                    updated.articleId, updated.sourceDeviceId, updated.independentChangedAt, updated.independentSortOrder
+                )
                 recordArticleChange(updated.articleId, "sourceState", articleChangedAt)
             }
         }

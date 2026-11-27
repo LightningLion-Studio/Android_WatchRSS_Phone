@@ -2340,162 +2340,164 @@ class PhoneCloudSyncService(
             head.id,
             manifest.allChunks.map(CloudChunkDescriptor::ciphertextSha256)
         )
-        val durableOverlay=if(fullTransfer)recordStore.privateOverlayEntries(client.scopeId(session))else emptyList()
-        val overlayArticles=durableOverlay.filter{it.kind=="article"}.mapTo(mutableSetOf()){it.id}
-        val overlayBooks=durableOverlay.filter{it.kind=="book"}.mapTo(mutableSetOf()){it.id}
-        val appliedOverlayEntries=mutableMapOf<String,CloudPrivateOverlayEntry>()
-        val overlayBodies=linkedMapOf<String,ByteArray>()
-        var overlayPending=0
-        val overlayObjectNames=mutableSetOf<String>()
-        if(fullTransfer && manifest.objects.any{it.name==CloudPrivateOverlay.NAME}) {
-            require(manifest.rawDocument?.json()?.optJSONObject("features")?.optJSONArray("incompat")?.let{a->(0 until a.length()).any{a.getString(it)==CloudPrivateOverlay.FEATURE}}==true)
-            val index=manifest.objects.single{it.name==CloudPrivateOverlay.NAME}
-            val entries=CloudPrivateOverlay.decode(materializeObject(session,accountKey,manifest,index,listOf(head)))
-            overlayObjectNames+=entries.mapNotNull{it.objectName}
-            for(entry in entries) {
-                val marker="private-overlay:"+entry.kind+":"+CloudSnapshotCodec.sha256(entry.id.toByteArray())
-                val old=recordStore.document(client.scopeId(session),marker)?.let{raw->CloudPrivateOverlay.decode(("{\"format\":\"watchrss-private-overlay\",\"version\":1,\"entries\":["+raw+"]}").toByteArray()).single()}
-                val winner=CloudPrivateOverlay.merge(listOfNotNull(old,entry)).single()
-                if(winner!=entry) {
-                    if(entry.kind=="article")overlayArticles+=entry.id else overlayBooks+=entry.id
-                    continue
-                }
-                if(entry.objectName==null) {
-                    if(entry.kind=="article")overlayArticles+=entry.id else overlayBooks+=entry.id
-                    recordStore.saveDocument(client.scopeId(session),marker,entry.changedAt.toString(),entry.json().toString(),CloudFormatAccess.WRITABLE)
-                    continue
-                }
-                val descriptor=manifest.objects.singleOrNull{it.name==entry.objectName}
-                if(descriptor==null || descriptor.access in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED)) {overlayPending++;continue}
-                try {
-                    val bodyMarker="private-overlay-body:"+entry.kind+":"+CloudSnapshotCodec.sha256(entry.id.toByteArray())
-                    val oldDescriptor=recordStore.document(client.scopeId(session),bodyMarker)
-                    if(old==entry && oldDescriptor!=null && oldDescriptor!=descriptor.toRawString())throw CloudFormatUpgradeRequired("overlay_body_conflict")
-                    val bytes=materializeObject(session,accountKey,manifest,descriptor,listOf(head))
-                    if(entry.kind=="article") {
-                        backupService.validatePrivateOverlayArticle(bytes,entry.id)
-                        overlayBodies[entry.id]=bytes;overlayArticles+=entry.id;appliedOverlayEntries[entry.id]=entry
-                    } else {
-                        require(descriptor.privateBook?.getString("bookId")==entry.id)
-                        overlayBooks+=entry.id;appliedOverlayEntries[entry.id]=entry
+        return codec.RestoreSession(accountKey, manifest).use { restoreSession ->
+            val durableOverlay=if(fullTransfer)recordStore.privateOverlayEntries(client.scopeId(session))else emptyList()
+            val overlayArticles=durableOverlay.filter{it.kind=="article"}.mapTo(mutableSetOf()){it.id}
+            val overlayBooks=durableOverlay.filter{it.kind=="book"}.mapTo(mutableSetOf()){it.id}
+            val appliedOverlayEntries=mutableMapOf<String,CloudPrivateOverlayEntry>()
+            val overlayBodies=linkedMapOf<String,ByteArray>()
+            var overlayPending=0
+            val overlayObjectNames=mutableSetOf<String>()
+            if(fullTransfer && manifest.objects.any{it.name==CloudPrivateOverlay.NAME}) {
+                require(manifest.rawDocument?.json()?.optJSONObject("features")?.optJSONArray("incompat")?.let{a->(0 until a.length()).any{a.getString(it)==CloudPrivateOverlay.FEATURE}}==true)
+                val index=manifest.objects.single{it.name==CloudPrivateOverlay.NAME}
+                val entries=CloudPrivateOverlay.decode(materializeObject(session,accountKey,manifest,index,listOf(head),restoreSession))
+                overlayObjectNames+=entries.mapNotNull{it.objectName}
+                for(entry in entries) {
+                    val marker="private-overlay:"+entry.kind+":"+CloudSnapshotCodec.sha256(entry.id.toByteArray())
+                    val old=recordStore.document(client.scopeId(session),marker)?.let{raw->CloudPrivateOverlay.decode(("{\"format\":\"watchrss-private-overlay\",\"version\":1,\"entries\":["+raw+"]}").toByteArray()).single()}
+                    val winner=CloudPrivateOverlay.merge(listOfNotNull(old,entry)).single()
+                    if(winner!=entry) {
+                        if(entry.kind=="article")overlayArticles+=entry.id else overlayBooks+=entry.id
+                        continue
                     }
-                } catch(error:Exception) {
-                    checkCloudEpoch(session,expectedEpoch)
-                    if(error !is CloudFormatUpgradeRequired && !recoverableCloudRestoreFailure(error))throw error
-                    overlayPending++
+                    if(entry.objectName==null) {
+                        if(entry.kind=="article")overlayArticles+=entry.id else overlayBooks+=entry.id
+                        recordStore.saveDocument(client.scopeId(session),marker,entry.changedAt.toString(),entry.json().toString(),CloudFormatAccess.WRITABLE)
+                        continue
+                    }
+                    val descriptor=manifest.objects.singleOrNull{it.name==entry.objectName}
+                    if(descriptor==null || descriptor.access in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED)) {overlayPending++;continue}
+                    try {
+                        val bodyMarker="private-overlay-body:"+entry.kind+":"+CloudSnapshotCodec.sha256(entry.id.toByteArray())
+                        val oldDescriptor=recordStore.document(client.scopeId(session),bodyMarker)
+                        if(old==entry && oldDescriptor!=null && oldDescriptor!=descriptor.toRawString())throw CloudFormatUpgradeRequired("overlay_body_conflict")
+                        val bytes=materializeObject(session,accountKey,manifest,descriptor,listOf(head),restoreSession)
+                        if(entry.kind=="article") {
+                            backupService.validatePrivateOverlayArticle(bytes,entry.id)
+                            overlayBodies[entry.id]=bytes;overlayArticles+=entry.id;appliedOverlayEntries[entry.id]=entry
+                        } else {
+                            require(descriptor.privateBook?.getString("bookId")==entry.id)
+                            overlayBooks+=entry.id;appliedOverlayEntries[entry.id]=entry
+                        }
+                    } catch(error:Exception) {
+                        checkCloudEpoch(session,expectedEpoch)
+                        if(error !is CloudFormatUpgradeRequired && !recoverableCloudRestoreFailure(error))throw error
+                        overlayPending++
+                    }
                 }
             }
-        }
-        val readableObjects=if(legacyRecovery)manifest.objects.filter(CloudSnapshotReuse::understoodObject)else manifest.objects
-        val formatPending=readableObjects.count { it.access in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED) &&
-            (it.name in setOf(RSS_STATE_OBJECT,NOTES_STATE_OBJECT,NOTES_ARCHIVE_OBJECT) || fullTransfer && (it.name in setOf(PRIVATE_LIBRARY_OBJECT,RELAY_LIBRARY_OBJECT)||it.privateArticle!=null||it.privateBook!=null||legacyRecovery && it.name.startsWith("private/articles/"))) }
-        val selectedObjects = readableObjects.filter { it.access !in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED) }.filter { descriptor ->
-            descriptor.name == RSS_STATE_OBJECT || descriptor.name == NOTES_STATE_OBJECT || descriptor.name == NOTES_ARCHIVE_OBJECT ||
-                (fullTransfer && (descriptor.name in setOf(PRIVATE_LIBRARY_OBJECT, RELAY_LIBRARY_OBJECT) || (descriptor.name.startsWith("reader/") && descriptor.privateArticle != null) || descriptor.privateBook!=null ||
-                    legacyRecovery && descriptor.name.startsWith("private/articles/") && descriptor.name !in overlayObjectNames))
-        }
-        val suppressedBooks=recordStore.privateOverlayEntries(client.scopeId(session)).filter{it.kind=="book" && it.objectName==null}.map{it.id}.toSet()
-        val chunkUrls = download.chunks.associateBy(CloudDownloadObject::sha256)
-        yieldToReading()
-        checkCloudEpoch(session, expectedEpoch)
-        update(CloudSyncPhase.MERGING, "正在合并远端快照")
-        var changed = false
-        var rssPending = overlayPending
-        val privateWarnings=mutableListOf<CloudRestoreWarning>()
-        // Restore one logical object at a time: retaining the archive, relay and
-        // RSS JSON together can exhaust the heap on a full phone library.
-        val restoreOrder = listOf(PRIVATE_LIBRARY_OBJECT, RELAY_LIBRARY_OBJECT, RSS_STATE_OBJECT, NOTES_STATE_OBJECT, NOTES_ARCHIVE_OBJECT)
-        for (descriptor in selectedObjects.sortedBy { restoreOrder.indexOf(it.name) }) {
-            if(descriptor.privateBook?.optString("bookId") in suppressedBooks)continue
+            val readableObjects=if(legacyRecovery)manifest.objects.filter(CloudSnapshotReuse::understoodObject)else manifest.objects
+            val formatPending=readableObjects.count { it.access in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED) &&
+                (it.name in setOf(RSS_STATE_OBJECT,NOTES_STATE_OBJECT,NOTES_ARCHIVE_OBJECT) || fullTransfer && (it.name in setOf(PRIVATE_LIBRARY_OBJECT,RELAY_LIBRARY_OBJECT)||it.privateArticle!=null||it.privateBook!=null||legacyRecovery && it.name.startsWith("private/articles/"))) }
+            val selectedObjects = readableObjects.filter { it.access !in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED) }.filter { descriptor ->
+                descriptor.name == RSS_STATE_OBJECT || descriptor.name == NOTES_STATE_OBJECT || descriptor.name == NOTES_ARCHIVE_OBJECT ||
+                    (fullTransfer && (descriptor.name in setOf(PRIVATE_LIBRARY_OBJECT, RELAY_LIBRARY_OBJECT) || (descriptor.name.startsWith("reader/") && descriptor.privateArticle != null) || descriptor.privateBook!=null ||
+                        legacyRecovery && descriptor.name.startsWith("private/articles/") && descriptor.name !in overlayObjectNames))
+            }
+            val suppressedBooks=recordStore.privateOverlayEntries(client.scopeId(session)).filter{it.kind=="book" && it.objectName==null}.map{it.id}.toSet()
+            val chunkUrls = download.chunks.associateBy(CloudDownloadObject::sha256)
             yieldToReading()
             checkCloudEpoch(session, expectedEpoch)
-            traceSync("object-start:${descriptor.name}")
-            val isPrivate=descriptor.name==PRIVATE_LIBRARY_OBJECT || descriptor.privateArticle!=null || descriptor.privateBook!=null || legacyRecovery && descriptor.name.startsWith("private/articles/")
-            if (isPrivate && !legacyRecovery && cloudObjectDiagnosticId(head.id,descriptor.name) in settings.abandonedRestoreIds(head.id)) continue
-            try {
-            for (chunk in manifest.chunksFor(descriptor).distinctBy { it.ciphertextSha256 }) {
-                checkCloudEpoch(session,expectedEpoch);yieldToReading()
-                if (cache.loadChunk(client.scopeId(session),chunk.ciphertextSha256)==null) {
-                    val remote=chunkUrls[chunk.ciphertextSha256] ?: throw java.io.IOException("云对象块列表暂不完整，请稍后重试")
-                    val bytes=client.download(remote.signedUrl,remote.sizeBytes,remote.sha256)
-                    checkCloudEpoch(session,expectedEpoch);cache.storeChunk(client.scopeId(session),remote.sha256,bytes);downloadedBytes+=bytes.size
-                }
-            }
-            val bytes = decodeCloudObject(head.id,descriptor.name) {
-                codec.restoreObjects(accountKey, manifest.objectSubset(listOf(descriptor))) {
-                    sha -> cache.loadChunk(client.scopeId(session), sha) ?: throw java.io.IOException("本地加密块暂不可用，请稍后重试")
-                }.getValue(descriptor.name)
-            }
-            if(descriptor.privateBook!=null) {
-                val value=requireNotNull(descriptor.privateBook)
-                require(descriptor.name==value.getString("packagePath"))
-                decodeCloudObject(head.id,descriptor.name) {backupService.restorePrivateBook(value,bytes){checkCloudEpoch(session,expectedEpoch)}}
-                changed=true
-                appliedOverlayEntries[value.getString("bookId")]?.let{entry->recordStore.saveDocument(client.scopeId(session),"private-overlay:book:"+CloudSnapshotCodec.sha256(entry.id.toByteArray()),entry.changedAt.toString(),entry.json().toString(),CloudFormatAccess.WRITABLE)}
-            }
-            if (descriptor.name.startsWith("reader/") && descriptor.privateArticle != null) {
-                restoreReaderObject(session,expectedEpoch,head.id,descriptor,bytes)?.let(privateWarnings::add)
-                changed = true
-            }
-            if(legacyRecovery && descriptor.name.startsWith("private/articles/") && descriptor.name !in overlayObjectNames) {
-                val result=backupService.restorePrivateLibrary(bytes,BackupImportMode.MERGE){checkCloudEpoch(session,expectedEpoch)}
-                privateWarnings+=result.warnings;changed=true
-            }
-            when (descriptor.name) {
-                PRIVATE_LIBRARY_OBJECT -> {
-                    val result = decodeCloudObject(head.id,descriptor.name) {
-                        backupService.restorePrivateLibrary(bytes, BackupImportMode.MERGE,
-                            excludedCloudArticles=overlayArticles,excludedCloudBooks=overlayBooks) { checkCloudEpoch(session, expectedEpoch) }
+            update(CloudSyncPhase.MERGING, "正在合并远端快照")
+            var changed = false
+            var rssPending = overlayPending
+            val privateWarnings=mutableListOf<CloudRestoreWarning>()
+            // Restore one logical object at a time: retaining the archive, relay and
+            // RSS JSON together can exhaust the heap on a full phone library.
+            val restoreOrder = listOf(PRIVATE_LIBRARY_OBJECT, RELAY_LIBRARY_OBJECT, RSS_STATE_OBJECT, NOTES_STATE_OBJECT, NOTES_ARCHIVE_OBJECT)
+            for (descriptor in selectedObjects.sortedBy { restoreOrder.indexOf(it.name) }) {
+                if(descriptor.privateBook?.optString("bookId") in suppressedBooks)continue
+                yieldToReading()
+                checkCloudEpoch(session, expectedEpoch)
+                traceSync("object-start:${descriptor.name}")
+                val isPrivate=descriptor.name==PRIVATE_LIBRARY_OBJECT || descriptor.privateArticle!=null || descriptor.privateBook!=null || legacyRecovery && descriptor.name.startsWith("private/articles/")
+                if (isPrivate && !legacyRecovery && cloudObjectDiagnosticId(head.id,descriptor.name) in settings.abandonedRestoreIds(head.id)) continue
+                try {
+                if (restoreSession.needsChunks(descriptor)) for (chunk in manifest.chunksFor(descriptor).distinctBy { it.ciphertextSha256 }) {
+                    checkCloudEpoch(session,expectedEpoch);yieldToReading()
+                    if (cache.loadChunk(client.scopeId(session),chunk.ciphertextSha256)==null) {
+                        val remote=chunkUrls[chunk.ciphertextSha256] ?: throw java.io.IOException("云对象块列表暂不完整，请稍后重试")
+                        val bytes=client.download(remote.signedUrl,remote.sizeBytes,remote.sha256)
+                        checkCloudEpoch(session,expectedEpoch);cache.storeChunk(client.scopeId(session),remote.sha256,bytes);downloadedBytes+=bytes.size
                     }
-                    privateWarnings += result.warnings
-                    changed = changed || result.changedArticleCount > 0 || result.changedSourceCount > 0 || result.changedSavedItemCount > 0
                 }
-                RELAY_LIBRARY_OBJECT -> changed = backupService.restoreCloudRelayLibrary(bytes, { checkCloudEpoch(session, expectedEpoch) }, { yieldToReading() }) > 0 || changed
-                RSS_STATE_OBJECT -> {
-                    val applied = backupService.applyCloudRssState(bytes, createMissing = true) { checkCloudEpoch(session, expectedEpoch) }
-                    changed = changed || applied.first > 0
-                    rssPending = applied.second
+                val bytes = decodeCloudObject(head.id,descriptor.name) {
+                    restoreSession.read(descriptor) {
+                        sha -> cache.loadChunk(client.scopeId(session), sha) ?: throw java.io.IOException("本地加密块暂不可用，请稍后重试")
+                    }
                 }
-                NOTES_STATE_OBJECT -> {
-                    NoteCloudStateCodec.decode(bytes).forEach { checkCloudEpoch(session, expectedEpoch); noteRepository.applyRemote(it, it.modifiedBy) }
+                if(descriptor.privateBook!=null) {
+                    val value=requireNotNull(descriptor.privateBook)
+                    require(descriptor.name==value.getString("packagePath"))
+                    decodeCloudObject(head.id,descriptor.name) {backupService.restorePrivateBook(value,bytes){checkCloudEpoch(session,expectedEpoch)}}
+                    changed=true
+                    appliedOverlayEntries[value.getString("bookId")]?.let{entry->recordStore.saveDocument(client.scopeId(session),"private-overlay:book:"+CloudSnapshotCodec.sha256(entry.id.toByteArray()),entry.changedAt.toString(),entry.json().toString(),CloudFormatAccess.WRITABLE)}
+                }
+                if (descriptor.name.startsWith("reader/") && descriptor.privateArticle != null) {
+                    restoreReaderObject(session,expectedEpoch,head.id,descriptor,bytes)?.let(privateWarnings::add)
                     changed = true
                 }
-                NOTES_ARCHIVE_OBJECT -> noteTransfer.restoreAssetsZip(bytes)
+                if(legacyRecovery && descriptor.name.startsWith("private/articles/") && descriptor.name !in overlayObjectNames) {
+                    val result=backupService.restorePrivateLibrary(bytes,BackupImportMode.MERGE){checkCloudEpoch(session,expectedEpoch)}
+                    privateWarnings+=result.warnings;changed=true
+                }
+                when (descriptor.name) {
+                    PRIVATE_LIBRARY_OBJECT -> {
+                        val result = decodeCloudObject(head.id,descriptor.name) {
+                            backupService.restorePrivateLibrary(bytes, BackupImportMode.MERGE,
+                                excludedCloudArticles=overlayArticles,excludedCloudBooks=overlayBooks) { checkCloudEpoch(session, expectedEpoch) }
+                        }
+                        privateWarnings += result.warnings
+                        changed = changed || result.changedArticleCount > 0 || result.changedSourceCount > 0 || result.changedSavedItemCount > 0
+                    }
+                    RELAY_LIBRARY_OBJECT -> changed = backupService.restoreCloudRelayLibrary(bytes, { checkCloudEpoch(session, expectedEpoch) }, { yieldToReading() }) > 0 || changed
+                    RSS_STATE_OBJECT -> {
+                        val applied = backupService.applyCloudRssState(bytes, createMissing = true) { checkCloudEpoch(session, expectedEpoch) }
+                        changed = changed || applied.first > 0
+                        rssPending = applied.second
+                    }
+                    NOTES_STATE_OBJECT -> {
+                        NoteCloudStateCodec.decode(bytes).forEach { checkCloudEpoch(session, expectedEpoch); noteRepository.applyRemote(it, it.modifiedBy) }
+                        changed = true
+                    }
+                    NOTES_ARCHIVE_OBJECT -> noteTransfer.restoreAssetsZip(bytes)
+                }
+                traceSync("object-done:${descriptor.name}")
+                } catch (error: Exception) {
+                    checkCloudEpoch(session,expectedEpoch)
+                    if (!isPrivate || !recoverablePrivateFailure(error)) throw error
+                    privateWarnings += cloudPrivateObjectWarning(head.id,descriptor.name,error)
+                }
             }
-            traceSync("object-done:${descriptor.name}")
-            } catch (error: Exception) {
+            for((id,bytes) in overlayBodies) {
                 checkCloudEpoch(session,expectedEpoch)
-                if (!isPrivate || !recoverablePrivateFailure(error)) throw error
-                privateWarnings += cloudPrivateObjectWarning(head.id,descriptor.name,error)
+                val applied=backupService.restorePrivateLibrary(bytes,BackupImportMode.MERGE){checkCloudEpoch(session,expectedEpoch)}
+                privateWarnings+=applied.warnings
+                changed=changed || applied.changedArticleCount>0
+                if(applied.warnings.isEmpty()) {
+                    val entry=appliedOverlayEntries.getValue(id)
+                    recordStore.saveDocument(client.scopeId(session),"private-overlay:article:"+CloudSnapshotCodec.sha256(id.toByteArray()),entry.changedAt.toString(),entry.json().toString(),CloudFormatAccess.WRITABLE)
+                    recordStore.saveDocument(client.scopeId(session),"private-overlay-body:article:"+CloudSnapshotCodec.sha256(id.toByteArray()),entry.changedAt.toString(),manifest.objects.single{it.name==entry.objectName}.toRawString(),CloudFormatAccess.WRITABLE)
+                }
             }
+            val settled=settleCloudRestoreWarnings(settings,head.id,privateWarnings) { checkCloudEpoch(session,expectedEpoch) }
+            _restoreWarnings.value += settled.visible
+            cache.storeManifest(client.scopeId(session),
+                head.id,
+                encryptedManifest,
+                markAsLocalHead = false
+            )
+            PullOutcome(
+                downloadedBytes = downloadedBytes,
+                pendingStates = rssPending+settled.pending.size+formatPending+if(legacyRecovery)privateWarnings.size else 0,
+                changed = changed,
+                stateApplied = rssPending == 0 && settled.pending.isEmpty() && formatPending == 0 && (!legacyRecovery || privateWarnings.isEmpty()),
+                complete = fullTransfer && rssPending == 0 && settled.pending.isEmpty() && formatPending == 0 && (!legacyRecovery || privateWarnings.isEmpty()),
+                warningsOnly = legacyRecovery && (rssPending>0 || settled.pending.isNotEmpty() || formatPending>0 || privateWarnings.isNotEmpty()) ||
+                    rssPending == 0 && (settled.pending.isNotEmpty() || formatPending > 0)
+            )
         }
-        for((id,bytes) in overlayBodies) {
-            checkCloudEpoch(session,expectedEpoch)
-            val applied=backupService.restorePrivateLibrary(bytes,BackupImportMode.MERGE){checkCloudEpoch(session,expectedEpoch)}
-            privateWarnings+=applied.warnings
-            changed=changed || applied.changedArticleCount>0
-            if(applied.warnings.isEmpty()) {
-                val entry=appliedOverlayEntries.getValue(id)
-                recordStore.saveDocument(client.scopeId(session),"private-overlay:article:"+CloudSnapshotCodec.sha256(id.toByteArray()),entry.changedAt.toString(),entry.json().toString(),CloudFormatAccess.WRITABLE)
-                recordStore.saveDocument(client.scopeId(session),"private-overlay-body:article:"+CloudSnapshotCodec.sha256(id.toByteArray()),entry.changedAt.toString(),manifest.objects.single{it.name==entry.objectName}.toRawString(),CloudFormatAccess.WRITABLE)
-            }
-        }
-        val settled=settleCloudRestoreWarnings(settings,head.id,privateWarnings) { checkCloudEpoch(session,expectedEpoch) }
-        _restoreWarnings.value += settled.visible
-        cache.storeManifest(client.scopeId(session),
-            head.id,
-            encryptedManifest,
-            markAsLocalHead = false
-        )
-        return PullOutcome(
-            downloadedBytes = downloadedBytes,
-            pendingStates = rssPending+settled.pending.size+formatPending+if(legacyRecovery)privateWarnings.size else 0,
-            changed = changed,
-            stateApplied = rssPending == 0 && settled.pending.isEmpty() && formatPending == 0 && (!legacyRecovery || privateWarnings.isEmpty()),
-            complete = fullTransfer && rssPending == 0 && settled.pending.isEmpty() && formatPending == 0 && (!legacyRecovery || privateWarnings.isEmpty()),
-            warningsOnly = legacyRecovery && (rssPending>0 || settled.pending.isNotEmpty() || formatPending>0 || privateWarnings.isNotEmpty()) ||
-                rssPending == 0 && (settled.pending.isNotEmpty() || formatPending > 0)
-        )
     }
 
     private suspend fun downloadSnapshotObjects(
@@ -2534,11 +2536,15 @@ class PhoneCloudSyncService(
                 }
             }
         }
-        val objects = manifest.objects.filter{it.access !in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED)}.associate { descriptor -> descriptor.name to decodeCloudObject(snapshotId,descriptor.name) {
-            codec.restoreObjects(accountKey, manifest.objectSubset(listOf(descriptor))) { sha ->
-                cache.loadChunk(client.scopeId(session), sha) ?: throw java.io.IOException("本地加密块暂不可用，请稍后重试")
-            }.getValue(descriptor.name)
-        } }
+        val objects = codec.RestoreSession(accountKey, manifest).use { restoreSession ->
+            manifest.objects.filter { it.access !in setOf(CloudFormatAccess.OPAQUE, CloudFormatAccess.ISOLATED) }.associate { descriptor ->
+                descriptor.name to decodeCloudObject(snapshotId, descriptor.name) {
+                    restoreSession.read(descriptor) { sha ->
+                        cache.loadChunk(client.scopeId(session), sha) ?: throw java.io.IOException("本地加密块暂不可用，请稍后重试")
+                    }
+                }
+            }
+        }
         return DecodedSnapshotObjects(download, objects, manifest)
     }
 
@@ -2570,10 +2576,11 @@ class PhoneCloudSyncService(
         return result
     }
 
-    private suspend fun materializeObject(session:PhoneAccountSession,key:ByteArray,manifest:CloudSnapshotManifest,descriptor:CloudObjectDescriptor,heads:List<CloudSnapshotHead>):ByteArray {
+    private suspend fun materializeObject(session:PhoneAccountSession,key:ByteArray,manifest:CloudSnapshotManifest,descriptor:CloudObjectDescriptor,heads:List<CloudSnapshotHead>,
+        restoreSession: CloudSnapshotCodec.RestoreSession? = null):ByteArray {
         val scope=client.scopeId(session)
         var remote:CloudSnapshotDownload?=null
-        for(chunk in manifest.chunksFor(descriptor))if(cache.loadChunk(scope,chunk.ciphertextSha256)==null) {
+        if (restoreSession?.needsChunks(descriptor) != false) for(chunk in manifest.chunksFor(descriptor))if(cache.loadChunk(scope,chunk.ciphertextSha256)==null) {
             checkCloudEpoch(session,manifest.settings.getString("libraryEpoch"))
             val download=remote ?: client.snapshot(session,manifest.snapshotId).also {
                 validateCloudManifestHeadIdentity(heads.single{h->h.id==manifest.snapshotId},it.head);remote=it
@@ -2582,7 +2589,9 @@ class PhoneCloudSyncService(
             cache.storeChunk(scope,chunk.ciphertextSha256,client.download(ref.signedUrl,ref.sizeBytes,ref.sha256))
         }
         checkCloudEpoch(session,manifest.settings.getString("libraryEpoch"))
-        return codec.restoreObjects(key,manifest.objectSubset(listOf(descriptor))){sha->cache.loadChunk(scope,sha) ?: throw java.io.IOException("云对象块暂不可用")}.getValue(descriptor.name)
+        fun chunk(sha: String) = cache.loadChunk(scope, sha) ?: throw java.io.IOException("云对象块暂不可用")
+        return restoreSession?.read(descriptor, ::chunk)
+            ?: codec.restoreObjects(key, manifest.objectSubset(listOf(descriptor)), ::chunk).getValue(descriptor.name)
     }
 
     private suspend fun uploadSnapshot(

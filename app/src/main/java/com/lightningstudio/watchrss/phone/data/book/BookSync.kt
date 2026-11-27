@@ -5,6 +5,7 @@ import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.cloud.CloudProtocolV2
 import com.lightningstudio.watchrss.phone.cloud.CloudSnapshotCodec
 import com.lightningstudio.watchrss.phone.cloud.PhoneCloudRecordCodec
+import com.lightningstudio.watchrss.phone.data.db.AppMetaEntity
 import org.json.*
 import java.security.MessageDigest
 
@@ -35,6 +36,7 @@ internal suspend fun readBookJson(read: suspend (offset: Int) -> String): String
 }
 
 @Dao interface BookDao {
+    @Upsert suspend fun putAliases(rows: List<AppMetaEntity>)
     @Query("SELECT substr(stateJson,:offset,65536) FROM imported_books WHERE bookId=:id")
     suspend fun bookJsonSlice(id: String, offset: Int): String
     @Query("SELECT substr(stateJson,:offset,65536) FROM imported_book_reading WHERE bookId=:id AND chapterIndex=:index")
@@ -94,6 +96,8 @@ internal suspend fun readBookJson(read: suspend (offset: Int) -> String): String
     @Insert(onConflict=OnConflictStrategy.REPLACE) suspend fun putChapters(rows:List<BookChapterEntity>)
     @Query("SELECT " + BOOK_READING_COLUMNS + SMALL_BOOK_JSON + " FROM imported_book_reading WHERE bookId=:id ORDER BY chapterIndex")
     suspend fun bookReadingHeaders(id: String): List<BookReadingEntity>
+    @Query("SELECT chapterIndex FROM imported_book_reading WHERE bookId=:id ORDER BY chapterIndex")
+    suspend fun readingIndices(id: String): List<Int>
     @Transaction suspend fun readingForBook(id: String): List<BookReadingEntity> = bookReadingHeaders(id).map { completeReading(it) }
     @Query("SELECT " + BOOK_READING_COLUMNS + SMALL_BOOK_JSON + " FROM imported_book_reading ORDER BY bookId,chapterIndex")
     suspend fun allReadingHeaders(): List<BookReadingEntity>

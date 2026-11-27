@@ -62,12 +62,22 @@ class CloudSnapshotCodec(
             .filter { it.accountRoot && it.access==CloudFormatAccess.WRITABLE }
             .flatMap { d->d.chunks.map { "${d.encoding}:${it.plaintextSha256}" to it } }
             .toMap().toMutableMap()
+        val priorByName = mutableMapOf<String, CloudObjectDescriptor>()
+        for (manifest in listOfNotNull(previousManifest) + reusableManifests) {
+            if (manifest.keyVersion != keyVersion) continue
+            val strict = CloudSnapshotReuse.scopeCompatible(manifest, snapshotSettings)
+            if (!strict && !CloudSnapshotReuse.scopeCompatible(manifest, snapshotSettings, true)) continue
+            for (descriptor in manifest.objects) {
+                if (strict || descriptor.name in authenticatedObjectHashes)
+                    priorByName.putIfAbsent(descriptor.name, descriptor)
+            }
+        }
         val newChunks = linkedMapOf<String, ByteArray>()
         val objectDescriptors = logicalObjects.map { logicalObject ->
             require(logicalObject.name.matches(OBJECT_NAME_PATTERN)) {
                 "云快照对象名称无效：${logicalObject.name}"
             }
-            val prior=(listOfNotNull(previousManifest)+reusableManifests).filter {it.keyVersion==keyVersion&&CloudSnapshotReuse.scopeCompatible(it,snapshotSettings,authenticatedObjectHashes.containsKey(logicalObject.name))}.flatMap{it.objects}.firstOrNull{it.name==logicalObject.name}
+            val prior = priorByName[logicalObject.name]
             if(prior!=null&&authenticatedObjectHashes[prior.name]==logicalObject.sha256()&&prior.originalBytes==logicalObject.originalBytes)return@map prior
             if(prior!=null&&prior.access!=CloudFormatAccess.WRITABLE)throw CloudFormatUpgradeRequired("object_read_only")
             val descriptors = mutableListOf<CloudChunkDescriptor>()
@@ -175,15 +185,63 @@ class CloudSnapshotCodec(
     }
 
     fun restoreObjects(accountKey:ByteArray,manifest:CloudSnapshotManifest,ciphertextChunk:(String)->ByteArray):Map<String,ByteArray> {
-        manifest.requireReadable();validateReferences(manifest)
-        val restored=linkedMapOf<String,ByteArray>()
-        fun restore(descriptor:CloudObjectDescriptor):ByteArray {
-            restored[descriptor.name]?.let{return it}
-            if(descriptor.access in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED))throw CloudFormatUpgradeRequired("object_opaque")
-            val ref=descriptor.entryRef
-            val bytes=if(ref!=null) {
-                val archive=manifest.objects.single{it.name==ref.getString("object")}
-                readArchiveEntry(restore(archive),ref.getString("entryPath"),descriptor.originalBytes)
+        return RestoreSession(accountKey, manifest).use { it.readAll(ciphertextChunk) }
+    }
+
+    /** A pull owns these verified files for exactly one manifest and account key. */
+    internal inner class RestoreSession(private val accountKey: ByteArray, private val manifest: CloudSnapshotManifest) : java.io.Closeable {
+        private val byName = manifest.objects.associateBy { it.name }
+        private val archives = mutableMapOf<String, VerifiedArchive>()
+
+        // Corruption of authenticated ZIP bytes is deterministic. A later private
+        // object still receives its own warning; transient download/I/O errors retry.
+        private val invalidArchives = mutableMapOf<String, Exception>()
+
+        fun needsChunks(descriptor: CloudObjectDescriptor): Boolean {
+            val target = descriptor.entryRef?.getString("object") ?: return true
+            return target !in archives && target !in invalidArchives
+        }
+
+        fun readAll(ciphertextChunk: (String) -> ByteArray): Map<String, ByteArray> {
+            manifest.requireReadable()
+            validateReferences(manifest)
+            val restored = linkedMapOf<String, ByteArray>()
+            for (descriptor in manifest.objects) {
+                if (descriptor.access !in setOf(CloudFormatAccess.OPAQUE, CloudFormatAccess.ISOLATED))
+                    restore(descriptor, ciphertextChunk, restored)
+            }
+            return restored
+        }
+
+        fun read(descriptor: CloudObjectDescriptor, ciphertextChunk: (String) -> ByteArray): ByteArray {
+            require(byName[descriptor.name] === descriptor)
+            val target = descriptor.entryRef?.getString("object")?.let(byName::get)
+            val subset = manifest.copy(objects = listOfNotNull(descriptor, target))
+            subset.requireReadable()
+            validateReferences(subset)
+            return restore(descriptor, ciphertextChunk)
+        }
+
+        private fun restore(descriptor: CloudObjectDescriptor, ciphertextChunk: (String) -> ByteArray,
+            restored: MutableMap<String, ByteArray>? = null): ByteArray {
+            restored?.get(descriptor.name)?.let { return it }
+            if (descriptor.access in setOf(CloudFormatAccess.OPAQUE, CloudFormatAccess.ISOLATED))
+                throw CloudFormatUpgradeRequired("object_opaque")
+            val ref = descriptor.entryRef
+            val bytes = if (ref != null) {
+                val name = ref.getString("object")
+                invalidArchives[name]?.let { throw it }
+                val archive = archives.getOrPut(name) {
+                    val plain = restore(byName.getValue(name), ciphertextChunk, restored)
+                    try {
+                        openArchive(plain)
+                    } catch (error: Exception) {
+                        if (error is IllegalArgumentException || error is java.util.zip.ZipException)
+                            invalidArchives[name] = error
+                        throw error
+                    }
+                }
+                archive.read(ref.getString("entryPath"), descriptor.originalBytes)
             } else {
                 val key=unwrapReaderKey(accountKey,descriptor)
                 val chunks=try {descriptor.chunks.map{decryptChunk(key,it,ciphertextChunk(it.ciphertextSha256))}}finally{if(key!==accountKey)key.fill(0)}
@@ -191,15 +249,20 @@ class CloudSnapshotCodec(
                 when(descriptor.encoding){"identity"->chunks.join();"gzip"->gunzip(chunks.join());"gzip-chunks-v1"->ByteArrayOutputStream().use{out->chunks.forEach{out.write(gunzip(it))};out.toByteArray()};else->throw CloudFormatUpgradeRequired("object_encoding")}
             }
             require(bytes.size.toLong()==descriptor.originalBytes){"云快照对象恢复长度不匹配"}
-            restored[descriptor.name]=bytes;return bytes
+            restored?.put(descriptor.name, bytes)
+            return bytes
         }
-        for(descriptor in manifest.objects)if(descriptor.access !in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED))restore(descriptor)
-        return restored
+
+        override fun close() {
+            archives.values.forEach { it.close() }
+            archives.clear()
+        }
     }
 
     internal fun validateReferences(manifest:CloudSnapshotManifest) {
         if(manifest.access in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED))return
-        require(manifest.objects.map{it.name}.distinct().size==manifest.objects.size)
+        val byName = manifest.objects.associateBy { it.name }
+        require(byName.size == manifest.objects.size)
         for(d in manifest.objects) {
             require(safePath(d.name)&&d.name.matches(OBJECT_NAME_PATTERN)) { "云快照对象路径无效" }
             if(d.access in setOf(CloudFormatAccess.OPAQUE,CloudFormatAccess.ISOLATED))continue
@@ -212,7 +275,7 @@ class CloudSnapshotCodec(
                 require(ref.keys().asSequence().toSet()==setOf("object","entryPath","encoding"))
                 require(ref.getString("encoding")=="identity"&&d.encoding=="identity"&&safePath(ref.getString("entryPath")))
                 require(d.chunks.isEmpty()&&d.rawDocument?.node(listOf("chunks"))==null&&d.readerKeyEnvelope==null&&d.objectKeyEnvelope==null)
-                val target=manifest.objects.singleOrNull{it.name==ref.getString("object")}?:error("归档引用缺失")
+                val target=byName[ref.getString("object")]?:error("归档引用缺失")
                 require(target.entryRef==null&&target.chunks.isNotEmpty()&&target.name!=d.name){"归档引用不得循环或串联"}
             }
         }
@@ -222,23 +285,51 @@ class CloudSnapshotCodec(
         return (0 until a.length()).any{a.optString(it)==feature}
     }
     internal fun safePath(path:String)=path.isNotEmpty()&&!path.startsWith('/')&&!path.contains('\\')&&!path.contains('\u0000')&&path.split('/').all{it.isNotEmpty()&&it!="."&&it!=".."}
-    private fun readArchiveEntry(archive:ByteArray,path:String,expected:Long):ByteArray {
-        require(safePath(path));var selected:ByteArray?=null;var total=0L;val seen=hashSetOf<String>()
-        val temporary=java.io.File.createTempFile("cloud-entry-ref-",".zip")
+    private class VerifiedArchive(val zip: java.util.zip.ZipFile, val file: java.io.File) : java.io.Closeable {
+        fun read(path: String, expected: Long): ByteArray {
+            val entry = requireNotNull(zip.getEntry(path)?.takeIf { !it.isDirectory && it.name == path }) { "归档引用条目不存在" }
+            require(entry.size == expected)
+            return zip.getInputStream(entry).use { it.readBytes() }
+        }
+        override fun close() {
+            try { zip.close() } finally { file.delete() }
+        }
+    }
+
+    private fun openArchive(bytes: ByteArray): VerifiedArchive {
+        val temporary = java.io.File.createTempFile("cloud-entry-ref-", ".zip")
         try {
-            temporary.writeBytes(archive)
-            java.util.zip.ZipFile(temporary).use {zip->val entries=zip.entries();while(entries.hasMoreElements()){
-                val entry=entries.nextElement()
-                require(seen.add(entry.name)&&seen.size<=100000&&safePath(entry.name.removeSuffix("/")))
-                val keep=entry.name==path&&!entry.isDirectory
-                val output=if(keep)ByteArrayOutputStream()else null;val buffer=ByteArray(8192);var size=0L;val crc=java.util.zip.CRC32()
-                zip.getInputStream(entry).use {input->while(true){val count=input.read(buffer);if(count<0)break;size+=count;total+=count;crc.update(buffer,0,count)
-                    require(size<=536870912L&&total<=4L*1024*1024*1024);if(keep){require(size<=expected);output!!.write(buffer,0,count)}}}
-                require(size==entry.size&&crc.value==entry.crc){"归档条目长度或CRC不匹配"}
-                if(keep)selected=output!!.toByteArray().also{require(it.size.toLong()==expected)}
-            }}
-            return requireNotNull(selected){"归档引用条目不存在"}
-        }finally{temporary.delete()}
+            temporary.writeBytes(bytes)
+            val archive = VerifiedArchive(java.util.zip.ZipFile(temporary), temporary)
+            try {
+                val seen = hashSetOf<String>()
+                val buffer = ByteArray(8192)
+                var total = 0L
+                for (entry in archive.zip.entries()) {
+                    require(seen.add(entry.name) && seen.size <= 100000 && safePath(entry.name.removeSuffix("/")))
+                    val crc = java.util.zip.CRC32()
+                    var size = 0L
+                    archive.zip.getInputStream(entry).use { input ->
+                        while (true) {
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            size += count
+                            total += count
+                            require(size <= 536870912L && total <= 4L * 1024 * 1024 * 1024)
+                            crc.update(buffer, 0, count)
+                        }
+                    }
+                    require(size == entry.size && crc.value == entry.crc) { "归档条目长度或CRC不匹配" }
+                }
+                return archive
+            } catch (failure: Throwable) {
+                archive.close()
+                throw failure
+            }
+        } catch (failure: Throwable) {
+            temporary.delete()
+            throw failure
+        }
     }
 
     /** Scoped per-chunk AES keys, never the root. Only used after explicit R48 consent. */

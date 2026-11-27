@@ -88,6 +88,11 @@ class CloudR48CompatibilityTest {
         fun ref(path:String="bodies/synthetic.txt",target:String="private-library.wrss")=CloudObjectDescriptor.fromRaw(JSONObject().put("name","private/article.txt").put("encoding","identity").put("originalBytes",plain.size).put("encodedBytes",plain.size).put("features",JSONObject().put("incompat",JSONArray(listOf("r48.entry-ref.v1")))).put("entryRef",JSONObject().put("object",target).put("entryPath",path).put("encoding","identity")).toString())
         val manifest=archive.manifest.copy(objects=archive.manifest.objects+ref())
         assertArrayEquals(plain,codec.restoreObjects(key,manifest){archive.newCiphertextChunks.getValue(it)}.getValue("private/article.txt"))
+        val another = ref().copy(name = "private/another.txt")
+        codec.RestoreSession(key, manifest.copy(objects = manifest.objects + another)).use { session ->
+            assertArrayEquals(plain, session.read(manifest.objects.last()) { archive.newCiphertextChunks.getValue(it) })
+            assertArrayEquals(plain, session.read(another) { error("shared archive decrypted twice") })
+        }
         for(path in listOf("../secret","/secret","a//b","a/./b","a\\b","not-present"))assertTrue(path,runCatching{codec.restoreObjects(key,archive.manifest.copy(objects=archive.manifest.objects+ref(path))){archive.newCiphertextChunks.getValue(it)}}.isFailure)
         assertTrue(runCatching{codec.restoreObjects(key,archive.manifest.copy(objects=listOf(ref(target="private/article.txt")))){byteArrayOf()}}.isFailure)
         assertTrue(runCatching{codec.restoreObjects(key,manifest.copy(objects=archive.manifest.objects+ref().copy(chunks=archive.manifest.objects.single().chunks))){archive.newCiphertextChunks.getValue(it)}}.isFailure)
@@ -208,7 +213,12 @@ class CloudR48CompatibilityTest {
         for(bytes in listOf(zip.copyOf(zip.size-22),zip.copyOf().also{a->val central=(0..a.size-4).first{a[it]==0x50.toByte()&&a[it+1]==0x4b.toByte()&&a[it+2]==0x01.toByte()&&a[it+3]==0x02.toByte()};a[central+16]=(a[central+16].toInt() xor 1).toByte()})) {
             val snapshot=codec.create(key,1,"phone",1,listOf(CloudLogicalObject("archive.zip",bytes,false)))
             val descriptor=CloudObjectDescriptor.fromRaw("{\"name\":\"body.txt\",\"encoding\":\"identity\",\"originalBytes\":4,\"encodedBytes\":4,\"features\":{\"incompat\":[\"r48.entry-ref.v1\"]},\"entryRef\":{\"object\":\"archive.zip\",\"entryPath\":\"a.txt\",\"encoding\":\"identity\"}}")
-            assertTrue(runCatching{codec.restoreObjects(key,snapshot.manifest.copy(objects=snapshot.manifest.objects+descriptor)){snapshot.newCiphertextChunks.getValue(it)}}.isFailure)
+            val manifest = snapshot.manifest.copy(objects = snapshot.manifest.objects + descriptor)
+            codec.RestoreSession(key, manifest).use { session ->
+                assertTrue(runCatching { session.read(descriptor) { snapshot.newCiphertextChunks.getValue(it) } }.isFailure)
+                assertFalse(session.needsChunks(descriptor))
+                assertTrue(runCatching { session.read(descriptor) { error("unexpected reload") } }.isFailure)
+            }
         }
     }
 

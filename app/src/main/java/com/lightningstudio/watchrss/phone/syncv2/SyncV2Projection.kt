@@ -1334,7 +1334,11 @@ internal class SyncV2Projection(
                 if(SyncV2Codec.hash(current)!=SyncV2Codec.hash(before))SyncV2Codec.fail("choice_stale")
                 val note=next.getJSONObject("note")
                 db.execSQL("UPDATE notes SET markdown=?,plainText=?,contentHash=?,baseContentHash=?,baseMarkdown=?,updatedAt=?,modifiedBy=? WHERE noteId=?",arrayOf(note.getString("markdown"),note.getString("plainText"),note.getString("contentHash"),note.getString("baseContentHash"),note.getString("baseMarkdown"),note.getLong("updatedAt"),note.getString("modifiedBy"),capture.noteId))
-                for(id in capture.openConflictIds)db.execSQL("UPDATE note_conflicts SET resolvedAt=? WHERE conflictId=? AND noteId=?",arrayOf<Any>(maxOf(1,now),id,capture.noteId))
+                for (ids in capture.openConflictIds.chunked(900)) {
+                    val placeholders = ids.joinToString(",") { "?" }
+                    db.execSQL("UPDATE note_conflicts SET resolvedAt=? WHERE noteId=? AND conflictId IN ($placeholders)",
+                        (listOf<Any>(maxOf(1,now), capture.noteId) + ids).toTypedArray())
+                }
                 db.execSQL("UPDATE syncv2_state SET local_revision=? WHERE scope=?",arrayOf(next.getString("localChangeRevision"),scope))
                 st.body.put("businessStamp",SyncV2BusinessWitness.read(db).encoded())
                 val business=JSONObject(note.toString()).put("noteConflicts",next.getJSONObject("conflicts"))

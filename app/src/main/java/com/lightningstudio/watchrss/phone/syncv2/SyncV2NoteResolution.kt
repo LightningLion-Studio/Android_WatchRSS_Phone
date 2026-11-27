@@ -7,7 +7,7 @@ import org.json.JSONObject
 internal object SyncV2NoteResolution {
     class Capture internal constructor(val sync:ChoiceCapture,val noteId:String,val expectedUpdatedAt:Long,
         val selectedConflictId:String,private val openJson:String) {
-        val openConflictIds:List<String> get()=SyncV2Wire.strings(JSONArray(openJson),1024)
+        val openConflictIds:List<String> by lazy { java.util.Collections.unmodifiableList(SyncV2Wire.strings(JSONArray(openJson),1024)) }
     }
     data class Budget(val root:JSONObject,val rootPlainBytes:Long,val rootStoredBytesUpperBound:Long,
         val rootRefsBytesUpperBound:Long,val closureStoredBytes:Long,val journalWorstBytes:Long,val requiredBytes:Long) {
@@ -53,7 +53,8 @@ internal object SyncV2NoteResolution {
         val hash=SyncV2Codec.hex(SyncV2Codec.sha(SyncV2Codec.utf8(body)))
         note.put("markdown",body).put("baseMarkdown",body).put("contentHash",hash).put("baseContentHash",hash).put("updatedAt",maxOf(now,old+1)).put("modifiedBy",device)
         derive?.invoke(note) // Product codec supplies plainText before the mandatory final budget.
-        for(i in 0 until conflicts.length()) {val r=conflicts.getJSONObject(i);if(r.getString("conflictId") in c.openConflictIds)r.put("resolvedAt",maxOf(1,now))}
+        val openIds = c.openConflictIds.toHashSet()
+        for(i in 0 until conflicts.length()) {val r=conflicts.getJSONObject(i);if(r.getString("conflictId") in openIds)r.put("resolvedAt",maxOf(1,now))}
         next.put("stateVersion",SyncV2Codec.next(st.getString("stateVersion"))).put("localChangeRevision",SyncV2Codec.next(st.getString("localChangeRevision")))
         next.getJSONArray("outbox").put(JSONObject().put("kind","note-resolution").put("noteId",c.noteId).put("resolvedConflictIds",JSONArray(c.openConflictIds)))
         return next to budget(st,next)

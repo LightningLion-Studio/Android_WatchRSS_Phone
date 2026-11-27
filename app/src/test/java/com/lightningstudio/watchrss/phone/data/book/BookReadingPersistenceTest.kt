@@ -142,6 +142,21 @@ class BookReadingPersistenceTest {
         val result=JSONObject(db.bookDao().get(id)!!.stateJson)
         assertEquals("remote title",result.getString("title"));assertTrue(BookSync.deletions(result).contains(1));assertEquals(500,result.getInt("deletionClock"))
     }
+    @Test fun capturesThreeDirtyPagesWithOneBookWrite() = runBlocking<Unit> {
+        val db = db()
+        mapped(db, 205)
+        val books = store(db)
+        books.captureLocalChanges()
+        val sql = db.openHelper.writableDatabase
+        sql.execSQL("CREATE TEMP TABLE capture_writes(n INTEGER)")
+        sql.execSQL("CREATE TEMP TRIGGER count_capture AFTER UPDATE ON imported_books BEGIN INSERT INTO capture_writes VALUES (1); END")
+        sql.execSQL("UPDATE phone_articles SET deleted=1, deletedAt=432")
+        books.captureLocalChanges()
+        val captured = JSONObject(db.bookDao().get(id)!!.stateJson)
+        assertEquals((1..205).toSet(), BookSync.deletions(captured))
+        assertEquals(432L, captured.getLong("deletionClock"))
+        sql.query("SELECT COUNT(*) FROM capture_writes").use { it.moveToFirst(); assertEquals(1, it.getInt(0)) }
+    }
     @Test fun physicalSourceAliasEditsStillUpdateBookWithoutWarmChapterScans()=runBlocking<Unit> {
         val db=db();mapped(db);val s=store(db)
         val localSource=ImportedContentIds.txtNovelSourceUrl("test")

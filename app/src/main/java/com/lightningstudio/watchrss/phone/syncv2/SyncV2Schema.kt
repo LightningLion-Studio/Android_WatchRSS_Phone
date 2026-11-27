@@ -71,6 +71,7 @@ internal object SyncV2Schema {
                 "CREATE TABLE IF NOT EXISTS syncv2_candidates(scope TEXT NOT NULL,entity_key TEXT NOT NULL,kind TEXT NOT NULL,logical_id TEXT NOT NULL,revision TEXT NOT NULL,meta BLOB NOT NULL,state BLOB NOT NULL,source_hash TEXT NOT NULL,PRIMARY KEY(scope,entity_key))",
                 "CREATE TABLE IF NOT EXISTS syncv2_tree_nodes(scope TEXT NOT NULL,prefix TEXT NOT NULL,body TEXT NOT NULL,hash TEXT NOT NULL,PRIMARY KEY(scope,prefix))",
                 "CREATE TABLE IF NOT EXISTS syncv2_provenance(scope TEXT NOT NULL,entity_key TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(scope,entity_key))",
+                "CREATE TABLE IF NOT EXISTS syncv2_book_provenance(scope TEXT NOT NULL,entity_key TEXT NOT NULL,source_hash TEXT NOT NULL,page INTEGER NOT NULL,body BLOB NOT NULL,retained INTEGER NOT NULL,PRIMARY KEY(scope,entity_key,source_hash,page))",
                 "CREATE TABLE IF NOT EXISTS syncv2_edit_base(scope TEXT NOT NULL,entity_key TEXT NOT NULL,account_base BLOB NOT NULL,meta BLOB NOT NULL,state BLOB NOT NULL,PRIMARY KEY(scope,entity_key))",
                 "CREATE TABLE IF NOT EXISTS syncv2_change_log(scope TEXT NOT NULL,revision TEXT NOT NULL,entity_key TEXT NOT NULL,PRIMARY KEY(scope,revision,entity_key))",
                 "CREATE TABLE IF NOT EXISTS syncv2_scan(scope TEXT NOT NULL,domain TEXT NOT NULL,binding TEXT NOT NULL,r0 TEXT NOT NULL,r1 TEXT,page_key TEXT NOT NULL,tail_seq INTEGER NOT NULL,complete INTEGER NOT NULL,PRIMARY KEY(scope,domain))",

@@ -32,6 +32,7 @@ internal class SyncV2Projection(
     internal var noteSegmentsServerAnnounced = false
     private val key=localKey.copyOf()
     val scope=identity.scopeJson
+    private val bookProvenance = SyncV2BookProvenance(db, scope, ::seal, ::open)
     init { require(key.size==32) }
     private fun gate() { if(closed)SyncV2Codec.fail("authentication_required");if(!enabled) SyncV2Codec.fail("feature_disabled") }
     private fun ensureActive() {
@@ -821,6 +822,7 @@ internal class SyncV2Projection(
         val desired=rows.map{it.getJSONObject("meta").getString("entityKey")}.toSet()
         for(entity in (bindings.keys+before.keys)-desired) {
             for(table in listOf("syncv2_candidates","syncv2_provenance","syncv2_wire_candidates","syncv2_p5_bindings"))db.execSQL("DELETE FROM $table WHERE scope=? AND entity_key=?",arrayOf(scope,entity))
+            bookProvenance.remove(entity)
             SyncV2CandidateTree(db,scope).remove(entity);accountCatalog.remove("candidate",entity);accountCatalog.remove("binding",entity)
         }
         val rss=rssApplied?:if(rows.any{it.getJSONObject("meta").getString("kind")=="rss-state"})SyncV2RssApply(db,rows)else null
@@ -1681,12 +1683,15 @@ internal class SyncV2Projection(
             SyncV2Business.PairObjects(installed.getJSONObject("meta"),installed.getJSONObject("state"))
         else SyncV2Business.project(d.kind,id2,entity,value2,null)
         installed?.optJSONObject("meta")?.optString("addedAtSource")?.takeIf{it in setOf("original","unknown")}?.let{objects.meta.put("addedAtSource",it)}
-        val provenance=provenance(d,if(d.kind=="note"&&id2!=id)"" else id)
-        val sourceHash=SyncV2Codec.hash(JSONObject().put("meta",objects.meta).put("state",objects.state).put("provenance",provenance))
+        val inlineProvenance = if (d.kind == "book") null else provenance(d, if (d.kind == "note" && id2 != id) "" else id)
+        val sourceHash = if (inlineProvenance == null) bookProvenance.sourceHash(id, objects)
+            else SyncV2Codec.hash(JSONObject().put("meta", objects.meta).put("state", objects.state).put("provenance", inlineProvenance))
         val previous=db.controlQuery("SELECT source_hash FROM syncv2_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{if(it.moveToFirst())it.getString(0) else null}
         if(previous==sourceHash) return
-        if (enqueue && owner.isNull("appliedAccount")) {
-            resetSources?.capture(d.kind, id2, sourceHash, value2, provenance) { accountSeal("reset-pending", it) }
+        val captureReset = resetSources != null && enqueue && owner.isNull("appliedAccount")
+        val provenance = inlineProvenance ?: bookProvenance.write(entity, id, sourceHash, captureReset)
+        if (captureReset) {
+            resetSources.capture(d.kind, id2, sourceHash, value2, provenance) { accountSeal("reset-pending", it) }
         }
         accountCatalog.put("candidate",JSONObject().put("meta",objects.meta).put("state",objects.state))
         val base=eventAccount?.let { JSONObject().put("accountOid",it.getString("oid")).put("generation",it.getString("generation")) }
@@ -1757,7 +1762,6 @@ internal class SyncV2Projection(
             "notes"->listOf("conflicts" to "SELECT * FROM note_conflicts WHERE noteId=? ORDER BY conflictId LIMIT 1025")
             "phone_articles"->listOf("register" to "SELECT * FROM article_register_provenance WHERE articleId=?")
             "note_assets"->listOf("asset" to "SELECT * FROM ${SyncV2NoteAssetNames.source} WHERE storageKey=?")
-            "imported_books"->listOf("chapters" to "SELECT * FROM imported_book_chapters WHERE bookId=? ORDER BY chapterIndex LIMIT 257")
             else->emptyList()
         }
         for((name,sql)in statements) {
@@ -1774,13 +1778,30 @@ internal class SyncV2Projection(
     }
     fun sourceProvenance(kind:String,id:String):JSONObject? {
         ensureActive()
-        return db.controlQuery("SELECT body FROM syncv2_provenance WHERE scope=? AND entity_key=?",arrayOf(scope,identity.entity(kind,id))).use{if(it.moveToFirst())open("provenance",it.getBlob(0))else null}
+        val entity = identity.entity(kind, id)
+        fun read(): JSONObject? {
+            val provenance = db.controlQuery("SELECT body FROM syncv2_provenance WHERE scope=? AND entity_key=?",
+                arrayOf(scope, entity)).use { if (it.moveToFirst()) open("provenance", it.getBlob(0)) else null }
+            return if (kind == "book" && provenance != null) bookProvenance.read(entity, provenance) else provenance
+        }
+        if (kind != "book" || db.inTransaction()) return read()
+        // Keep the pointer and pages in the same snapshot during replacement or removal.
+        db.beginTransactionNonExclusive()
+        try {
+            return read().also { db.setTransactionSuccessful() }
+        } finally {
+            db.endTransaction()
+        }
     }
     private fun markRemoved(d: SyncV2Schema.Domain,id: String,revision: String) {
         val entity=identity.entity(d.kind,id)
         accountCatalog.remove("candidate",entity)
         val prior=db.controlQuery("SELECT meta,state FROM syncv2_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{if(it.moveToFirst())it.getBlob(0) to it.getBlob(1) else null}
         if(prior!=null && open("candidate-state",prior.second).optBoolean("projectionRemoved"))return
+        if (d.kind == "book") {
+            db.execSQL("DELETE FROM syncv2_provenance WHERE scope=? AND entity_key=?", arrayOf(scope, entity))
+            bookProvenance.remove(entity)
+        }
         val account=readState().body.optJSONObject("appliedAccount")?:readState().body.optJSONObject("account")
         if(prior!=null && account!=null)db.execSQL("INSERT OR IGNORE INTO syncv2_edit_base VALUES(?,?,?,?,?)",arrayOf(scope,entity,seal("edit-base",JSONObject().put("accountOid",account.getString("oid")).put("generation",account.getString("generation"))),prior.first,prior.second))
         val meta=prior?.first?:seal("meta",JSONObject().put("version",2).put("entityKey",entity).put("kind",d.kind).put("logicalId",id).put("addedAtSource","unknown").put("requiredFeatures",JSONArray()).put("payload",JSONObject()))

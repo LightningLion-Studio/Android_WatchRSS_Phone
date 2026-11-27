@@ -20,7 +20,10 @@ import com.lightningstudio.watchrss.phone.data.note.MarkdownArchiveEntry
 import com.lightningstudio.watchrss.phone.data.note.MarkdownNoteArchive
 import com.lightningstudio.watchrss.phone.data.note.NoteImportExportService
 import com.lightningstudio.watchrss.phone.data.note.NoteRepository
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.SocketPolicy
 import okio.Buffer
@@ -35,6 +38,9 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.SQLiteMode
 import java.io.File
 import java.util.Base64
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk=[35])
@@ -45,23 +51,60 @@ class SyncV2BodyTransportTest {
         val puts=mutableListOf<Pair<String,Int>>();val reads=mutableListOf<Int>();var writeError:String?=null;var status=503;var delay:Long?=null;var retryable:Boolean?=null
         var losePart=false;var loseRead=false;var bodyRequests=0;var reserveCalls=0;var beforeRead:(()->Unit)?=null
         var beforeList: (() -> Unit)? = null
+        var beforePut: ((String, Int, ByteArray) -> MockResponse?)? = null
+        var reservePartHeader: String? = null
+        var missingPartHeader: String? = null
+        var maxAcceptedPart = 65_536
+        var missingCalls = 0
+        val putLengths = mutableListOf<Int>()
         var listCalls = 0
         var completeCalls = 0
         var downloadBytes = 0L
         var uploadBytes = 0L
         init {val previous=f.f.route;f.f.route={r->val url=r.requestUrl!!;val p=url.encodedPath.removePrefix("/functions/v1/cloud/bodies/v1/")
             if(!url.encodedPath.startsWith("/functions/v1/cloud/bodies/v1/"))previous!!.invoke(r)else {
-                bodyRequests++
+                synchronized(this) { bodyRequests++ }
                 fun json(v:JSONObject):MockResponse=f.f.response(JSONObject().put("version",1).put("purpose",SyncV2BodyCodec.PURPOSE).put("scope",f.identity.scope).also{o->for(k in v.keys())o.put(k,v.get(k))})
+                fun uploadStatus(id: String, header: String?): MockResponse {
+                    val descriptors = SyncV2BodyCodec.objects(descriptors.getValue(id).getJSONObject("body"))
+                    val offsets = descriptors.map { o ->
+                        JSONObject(o.toString()).put("offset", objects[o.getString("sha256")]?.size ?: 0)
+                    }
+                    return json(JSONObject().put("carrierId", id).put("state", if (id in ready) "ready" else "reserved")
+                        .put("expiresAtMillis", 600000).put("objects", JSONArray(offsets))).also {
+                        if (header != null) it.setHeader("X-WatchRSS-Max-Body-Part-Bytes", header)
+                    }
+                }
                 if(r.method!="GET" && writeError!=null) {f.f.response(JSONObject().put("error",JSONObject().put("code",writeError).put("retryable",retryable?:(status==429||status==507)).put("retryAfterMillis",delay?:JSONObject.NULL).put("details",JSONObject()))).setResponseCode(status)}
                 else if(p=="reserve") {
                     reserveCalls++;assertEquals(null,url.queryParameter("repoId"));assertEquals("old-epoch",r.getHeader("x-watchrss-library-epoch"));val d=JSONObject(r.body.readUtf8());val b=SyncV2BodyCodec.validate(d,f.identity.scope);val id=b.getString("carrierId");descriptors[id]=d
-                    json(JSONObject().put("carrierId",id).put("state",if(id in ready)"ready"else"reserved").put("expiresAtMillis",600000).put("objects",JSONArray(SyncV2BodyCodec.objects(b).map{o->JSONObject(o.toString()).put("offset",objects[o.getString("sha256")]?.size?:0)})))
+                    uploadStatus(id, reservePartHeader)
+                } else if (p.endsWith("/missing")) {
+                    missingCalls++
+                    assertEquals(setOf("scope"), JSONObject(r.body.readUtf8()).keys().asSequence().toSet())
+                    uploadStatus(p.split('/')[1], missingPartHeader)
                 }else if(r.method=="PUT") {
                     val parts=p.split('/');val hash=parts[3];val at=parts[5].toInt();val raw=r.body.readByteArray()
-                    assertEquals(f.identity.repoId,r.getHeader("x-watchrss-sync-repo-id"));assertTrue(raw.size in 1..65536);assertEquals(SyncV2BodyCodec.hash(raw),r.getHeader("x-watchrss-sync-part-sha256"))
-                    assertEquals(objects[hash]?.size?:0,at);objects[hash]=(objects[hash]?:byteArrayOf())+raw;puts.add(hash to at);uploadBytes+=raw.size
-                    if(losePart){losePart=false;MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST)}else json(JSONObject())
+                    assertEquals(f.identity.repoId,r.getHeader("x-watchrss-sync-repo-id"))
+                    assertEquals("application/octet-stream", r.getHeader("Content-Type"))
+                    assertEquals(SyncV2BodyCodec.hash(raw),r.getHeader("x-watchrss-sync-part-sha256"))
+                    beforePut?.invoke(hash, at, raw) ?: synchronized(this) {
+                        assertTrue(raw.size in 1..maxAcceptedPart)
+                        assertEquals(0, at % 65_536)
+                        assertEquals(objects[hash]?.size ?: 0, at)
+                        val id = parts[1]
+                        val size = SyncV2BodyCodec.objects(descriptors.getValue(id).getJSONObject("body"))
+                            .first { it.getString("sha256") == hash }.getInt("sizeBytes")
+                        assertTrue(at + raw.size == size || raw.size % 65_536 == 0)
+                        objects[hash] = (objects[hash] ?: byteArrayOf()) + raw
+                        puts.add(hash to at)
+                        putLengths.add(raw.size)
+                        uploadBytes += raw.size
+                        if (losePart) {
+                            losePart = false
+                            MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST)
+                        } else json(JSONObject())
+                    }
                 }else if(p.endsWith("/complete")) {
                     completeCalls++
                     val id=p.split('/')[1];for(o in SyncV2BodyCodec.objects(descriptors.getValue(id).getJSONObject("body"))){assertEquals(o.getInt("sizeBytes"),objects[o.getString("sha256")]!!.size);assertEquals(o.getString("sha256"),SyncV2BodyCodec.hash(objects[o.getString("sha256")]!!))};ready.add(id)
@@ -79,6 +122,194 @@ class SyncV2BodyTransportTest {
             }
         }}
     }
+    private class UploadBook(val f: SyncV2P5Fixture, size: Int) : AutoCloseable {
+        val backend = Backend(f)
+        val client = f.f.client().also { it.capabilities() }
+        private val raw = ByteArray(size) { (it % 251).toByte() }
+        private val id = "ab".repeat(32)
+        private val entity = f.identity.entity("book", id)
+        private val binding = SyncV2BodyCodec.Binding("book", id, entity,
+            SyncV2BodyCodec.revision("book", entity, SyncV2BodyCodec.hash(raw)))
+        private val anchor = JSONObject().put("commitOid", "commit:sha256:${"ab".repeat(32)}")
+            .put("revision", "1").put("rollbackGeneration", "0")
+        private val prepared = SyncV2BodyCodec.prepare(f.identity.scope, anchor, binding, f.key, 1, f.f.signer, raw)
+        private val directory = File(f.root, "part-negotiation")
+        private val body = prepared.descriptor.getJSONObject("body")
+        val manifest = body.getJSONObject("manifest").getString("sha256")
+        val chunks = prepared.objects.filterKeys { it != manifest }
+        init {
+            directory.mkdirs()
+            for ((hash, bytes) in prepared.objects) File(directory, hash).writeBytes(bytes)
+        }
+
+        fun skipManifest() {
+            backend.objects[manifest] = prepared.objects.getValue(manifest)
+            assertTrue(File(directory, manifest).delete())
+        }
+
+        fun upload(beforeTransfer: () -> Unit = {}) {
+            SyncV2BodyHttp(client) {}.upload(prepared.descriptor, directory, beforeTransfer)
+            assertEquals(1, backend.completeCalls)
+        }
+
+        fun assertRoundTrip() {
+            assertArrayEquals(raw, SyncV2BodyCodec.open(prepared.descriptor, f.identity.scope, binding,
+                f.f.signer.publicHex, { f.key }) { hash, _ -> backend.objects.getValue(hash) })
+        }
+
+        override fun close() {
+            client.close()
+            f.close()
+        }
+    }
+
+    @Test fun advertised512KUsesOnePutPerFullBookObject() {
+        UploadBook(SyncV2P5Fixture(), 1_100_000).use { book ->
+            book.backend.reservePartHeader = "524288"
+            book.backend.maxAcceptedPart = 524_288
+            book.upload()
+
+            assertEquals(3, book.chunks.size)
+            for ((hash, bytes) in book.chunks) {
+                assertEquals(listOf(hash to 0), book.backend.puts.filter { it.first == hash })
+                assertEquals(bytes.size, book.backend.putLengths[book.backend.puts.indexOf(hash to 0)])
+            }
+            assertEquals(2, book.backend.putLengths.count { it == 524_288 })
+            assertEquals(0, book.backend.missingCalls)
+            book.assertRoundTrip()
+        }
+    }
+
+    @Test fun missingAndInvalidPartHeadersUseLegacy64K() {
+        for (header in listOf(null, "invalid", "131073", "32768", "589824")) {
+            UploadBook(SyncV2P5Fixture(), 200_000).use { book ->
+                book.backend.reservePartHeader = header
+                book.skipManifest()
+                book.upload()
+                assertEquals(listOf(65_536, 65_536, 65_536, 3_443), book.backend.putLengths)
+                assertEquals(0, book.backend.missingCalls)
+            }
+        }
+    }
+
+    @Test fun payloadTooLargeFromProxyDowngradesAndRefreshesOffset() =
+        rejectedLargePartResumes(MockResponse().setResponseCode(413).setBody("Payload Too Large"))
+
+    @Test fun objectTooLargeFromBackendDowngradesAndRefreshesOffset() =
+        rejectedLargePartResumes(partError(400, "object_too_large"))
+
+    private fun rejectedLargePartResumes(rejection: MockResponse) {
+        UploadBook(SyncV2P5Fixture(), 450_000).use { book ->
+            val backend = book.backend
+            backend.reservePartHeader = "524288"
+            backend.missingPartHeader = "524288"
+            book.skipManifest()
+            val (hash, bytes) = book.chunks.entries.single()
+            var rejected = false
+            backend.beforePut = { _, offset, part ->
+                if (!rejected) {
+                    assertEquals(0, offset)
+                    assertArrayEquals(bytes, part)
+                    // A different upload already advanced the prefix after reserve.
+                    backend.objects[hash] = bytes.copyOf(65_536)
+                    rejected = true
+                    rejection
+                } else null
+            }
+            book.upload()
+
+            assertTrue(rejected)
+            assertEquals(1, backend.missingCalls)
+            assertEquals(65_536, backend.puts.first().second)
+            assertTrue(backend.putLengths.all { it <= 65_536 })
+            book.assertRoundTrip()
+        }
+    }
+
+    @Test fun offsetAndPartConflictsUseOffsetAndLimitFromMissing() {
+        for (code in listOf("offset_conflict", "part_conflict")) {
+            UploadBook(SyncV2P5Fixture(), 460_000).use { book ->
+                val backend = book.backend
+                backend.missingPartHeader = "262144"
+                backend.maxAcceptedPart = 262_144
+                book.skipManifest()
+                val (hash, bytes) = book.chunks.entries.single()
+                backend.beforePut = { _, at, part ->
+                    if (at == 0) {
+                        assertEquals(65_536, part.size)
+                        backend.objects[hash] = bytes.copyOf(65_536)
+                        partError(409, code)
+                    } else null
+                }
+                book.upload()
+
+                assertEquals(1, backend.missingCalls)
+                assertEquals(listOf(hash to 65_536, hash to 327_680), backend.puts)
+                assertEquals(listOf(262_144, bytes.size - 327_680), backend.putLengths)
+                book.assertRoundTrip()
+            }
+        }
+    }
+
+    @Test fun mixedDurablePrefixesResumeWithAtMostThreeConcurrentObjects() {
+        UploadBook(SyncV2P5Fixture(), 2_100_000).use { book ->
+            val backend = book.backend
+            backend.reservePartHeader = "524288"
+            backend.maxAcceptedPart = 524_288
+            book.skipManifest()
+            val full = book.chunks.filterValues { it.size == 524_288 }.keys.toList()
+            backend.objects[full[0]] = book.chunks.getValue(full[0])
+            backend.objects[full[1]] = book.chunks.getValue(full[1]).copyOf(65_536)
+            val reached = CountDownLatch(3)
+            val inFlight = AtomicInteger()
+            val peak = AtomicInteger()
+            backend.beforePut = { _, _, _ ->
+                val count = inFlight.incrementAndGet()
+                peak.accumulateAndGet(count, ::maxOf)
+                try {
+                    reached.countDown()
+                    assertTrue("Three objects must reach PUT before any response", reached.await(5, TimeUnit.SECONDS))
+                    null
+                } finally {
+                    inFlight.decrementAndGet()
+                }
+            }
+
+            book.upload()
+
+            assertEquals(3, peak.get())
+            assertEquals(4, backend.puts.size)
+            assertTrue(backend.puts.none { it.first == full[0] || it.first == book.manifest })
+            assertTrue(full[1] to 65_536 in backend.puts)
+            assertEquals(0, backend.missingCalls)
+            book.assertRoundTrip()
+        }
+    }
+
+    @Test fun cancellingRoundCancelsAllInFlightParts() = runBlocking<Unit> {
+        UploadBook(SyncV2P5Fixture(), 1_100_000).use { book ->
+            val backend = book.backend
+            backend.reservePartHeader = "524288"
+            book.skipManifest()
+            val entered = CountDownLatch(3)
+            backend.beforePut = { _, _, _ ->
+                entered.countDown()
+                MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE)
+            }
+            val upload = launch(Dispatchers.IO) { SyncV2CloudClient.runCancellable { book.upload() } }
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+
+            upload.cancel()
+            withTimeout(5_000) { upload.join() }
+
+            assertEquals(0, backend.completeCalls)
+        }
+    }
+
+    private fun partError(status: Int, code: String): MockResponse = MockResponse().setResponseCode(status)
+        .setBody(JSONObject().put("error", JSONObject().put("code", code).put("retryable", false)
+            .put("retryAfterMillis", JSONObject.NULL).put("details", JSONObject())).toString())
+
     private fun keys(f:SyncV2P5Fixture):SyncV2ContentKeys {
         val context=RuntimeEnvironment.getApplication() as Context
         val manager=CloudKeyManager(null,preferencesOverride=context.getSharedPreferences("body-${System.nanoTime()}",Context.MODE_PRIVATE)).also{it.bindBackend("http://synthetic");it.saveAccountKey("u",1,f.key,true)}

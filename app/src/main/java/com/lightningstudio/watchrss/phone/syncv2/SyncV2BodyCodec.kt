@@ -61,8 +61,10 @@ internal object SyncV2BodyCodec {
         val rawHash=hash(raw)
         if(revision(binding.kind,binding.entityKey,rawHash)!=binding.bodyRevision)SyncV2Codec.fail("body_revision_changed")
         val id=SyncV2Codec.hex(SyncV2Codec.random(16));val uuid=uuid(id);val objects=linkedMapOf<String,ByteArray>();val chunks=JSONArray()
-        for(at in 0 until maxOf(1,raw.size) step 262144) {
-            val part=raw.copyOfRange(at,minOf(raw.size,at+262144));val plainHash=hash(part)
+        // Leave room for the WRSSCC2 envelope so a full book object fits one 512 KiB PUT.
+        val chunkBytes = if (binding.kind == "book") 512 * 1024 - 51 else 256 * 1024
+        for(at in 0 until maxOf(1,raw.size) step chunkBytes) {
+            val part=raw.copyOfRange(at,minOf(raw.size,at+chunkBytes));val plainHash=hash(part)
             val encrypted=seal(key,"watchrss/cloud/chunk/v1","watchrss-cloud-chunk-v1:$plainHash","WRSSCC2",part)
             val sha=hash(encrypted);objects[sha]=encrypted
             chunks.put(JSONObject().put("plaintextSha256",plainHash).put("ciphertextSha256",sha).put("plaintextBytes",part.size).put("ciphertextBytes",encrypted.size)

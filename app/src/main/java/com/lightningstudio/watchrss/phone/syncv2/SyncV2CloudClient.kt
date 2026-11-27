@@ -8,6 +8,7 @@ import com.lightningstudio.watchrss.phone.cloud.CloudHeadDeviceSessionRejected
 import com.lightningstudio.watchrss.phone.cloud.isRefreshableCloudDeviceSessionError
 import com.lightningstudio.watchrss.phone.network.CloudCallCancellation
 import com.lightningstudio.watchrss.phone.network.limitToDeadline
+import kotlinx.coroutines.asContextElement
 import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -18,7 +19,7 @@ import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
-internal class SyncV2CloudError(val code: String, val retryable: Boolean = false, val retryAfterMillis: Long? = null, val details:JSONObject = JSONObject()) : IOException(code) {
+internal class SyncV2CloudError(val code: String, val retryable: Boolean = false, val retryAfterMillis: Long? = null, val details:JSONObject = JSONObject(), val httpStatus: Int? = null) : IOException(code) {
     val display: String get() = when(code) {
         "upgrade_required", "unsupported_feature" -> "云资料格式需要升级"
         "cloud_account_busy", "library_busy" -> "同步忙，请稍后重试"
@@ -61,6 +62,8 @@ internal class SyncV2CloudClient(
         executionDeadline.set(if(previous==null)next else minOf(previous,next))
         try{return work()}finally{if(previous==null)executionDeadline.remove()else executionDeadline.set(previous)}
     }
+    internal fun bodyUploadContext() = executionDeadline.asContextElement() + roundCancellation.asContextElement()
+
     private var capabilitiesChecked=false
     private var contentWrite=false
     private val owner: List<String>
@@ -105,6 +108,10 @@ internal class SyncV2CloudClient(
             return execute(call) { response ->
                 if (response.code in setOf(401, 403)) onAuthenticationResponse(s.userId, response.code, "")
                 if(response.code in 300..399)SyncV2Codec.fail("isolated_backend_required")
+                if (bodyChannel && method == "PUT" && response.code == 413) {
+                    active()
+                    throw SyncV2CloudError("object_too_large", httpStatus = response.code)
+                }
                 val limit = if(raw && response.isSuccessful) 266264 else 1048576
                 val data = response.body?.byteStream()?.use { input ->
                     val out=java.io.ByteArrayOutputStream();val block=ByteArray(8192)
@@ -122,7 +129,7 @@ internal class SyncV2CloudClient(
                     if (cloudResetSignal(response.code, code, null, details.optJSONArray("requiredFeatures"))) {
                         onCloudReset(s.userId, response.code == 426)
                     }
-                    throw SyncV2CloudError(code,error.getBoolean("retryable"),delay?:if(bodyChannel && response.code in setOf(429,507))60000L else null,details)
+                    throw SyncV2CloudError(code,error.getBoolean("retryable"),delay?:if(bodyChannel && response.code in setOf(429,507))60000L else null,details,response.code)
                 }
                 if(raw && !bodyChannel) {
                     if(response.code != if(headers.containsKey("Range"))206 else 200)SyncV2Codec.fail("invalid_range")
@@ -401,7 +408,7 @@ internal class SyncV2CloudClient(
         return raw
     }
     companion object {
-        // The synchronous protocol stays on one IO thread for the duration of the round.
+        // Parallel body uploads carry this scope and the execution deadline to each worker.
         private val roundCancellation = ThreadLocal<CloudCallCancellation>()
 
         suspend fun <T> runCancellable(work: () -> T): T = CloudCallCancellation.run { cancellation ->

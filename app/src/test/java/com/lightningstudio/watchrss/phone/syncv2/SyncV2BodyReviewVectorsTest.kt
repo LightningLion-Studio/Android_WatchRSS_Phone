@@ -23,7 +23,7 @@ class SyncV2BodyReviewVectorsTest {
     private fun un64(s:String)=Base64.getDecoder().decode(s)
     private fun b(kind:String,id:String,raw:ByteArray)=SyncV2BodyCodec.Binding(kind,id,"cc".repeat(32),SyncV2BodyCodec.revision(kind,"cc".repeat(32),SyncV2BodyCodec.hash(raw)))
     private fun book():Pair<JSONObject,ByteArray> {
-        val text="review 正文\r\nAé😀";val fp=com.lightningstudio.watchrss.phone.data.book.BookSync.fingerprint(listOf(com.lightningstudio.watchrss.phone.data.book.BookSync.chapterHash(1,"Ch",text)))
+        val text="review 正文\r\nAé😀".repeat(30_000);val fp=com.lightningstudio.watchrss.phone.data.book.BookSync.fingerprint(listOf(com.lightningstudio.watchrss.phone.data.book.BookSync.chapterHash(1,"Ch",text)))
         val id=com.lightningstudio.watchrss.phone.data.book.BookSync.id(fp)
         val raw=(JSONObject().put("format","watchrss-book").put("version",1).put("title","Review").put("chapterCount",1).put("sourceUrl","https://watchrss.local/import-txt-novel/review").put("kind","txt").toString()+"\n"+JSONObject().put("chapterIndex",1).put("title","Ch").put("contentText",text).put("contentHtml",JSONObject.NULL).put("url","https://watchrss.local/import-txt-novel/review/chapter/1").toString()+"\n").toByteArray()
         return JSONObject().put("bookId",id).put("fingerprint",fp).put("chapterCount",1).put("deleted",false) to raw
@@ -58,6 +58,7 @@ class SyncV2BodyReviewVectorsTest {
             val (bookValue,bookRaw)=book();val items=JSONArray()
             val samples=(listOf(0,1,262144,262145,5*1024*1024).map{Triple("asset","n$it.bin",ByteArray(it){n->(n%251).toByte()})}+Triple("book",bookValue.getString("bookId"),bookRaw))
             for((kind,id,raw)in samples){val bind=b(kind,id,raw);val prepared=SyncV2BodyCodec.prepare(scope,anchor,bind,key,1,f.f.signer,raw)
+                if (kind == "book") assertTrue(prepared.objects.values.any { it.size == 524_288 })
                 items.put(JSONObject().put("binding",JSONObject().put("kind",kind).put("logicalId",id).put("entityKey",bind.entityKey).put("bodyRevision",bind.bodyRevision)).put("raw",b64(raw)).put("value",if(kind=="book")bookValue else JSONObject()).put("descriptor",prepared.descriptor).put("objects",JSONObject(prepared.objects.mapValues{b64(it.value)})))
             }
             val idKey=ByteArray(32){11};val entity="cc".repeat(32);val articleRaw="review 正文\r\nAé😀".repeat(20000).toByteArray()

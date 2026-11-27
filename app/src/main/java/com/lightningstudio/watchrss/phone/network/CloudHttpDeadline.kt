@@ -11,7 +11,7 @@ import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import java.io.InterruptedIOException
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
 import kotlin.coroutines.resume
@@ -53,7 +53,7 @@ internal class CloudCallCancellation private constructor(
     private val continuation: CancellableContinuation<*>,
     private val deadline: CloudHttpDeadline?
 ) {
-    private val activeCall = AtomicReference<Call?>()
+    private val activeCalls = ConcurrentHashMap.newKeySet<Call>()
 
     fun checkActive() {
         if (!continuation.isActive) throw CancellationException("Cloud request cancelled")
@@ -61,7 +61,7 @@ internal class CloudCallCancellation private constructor(
 
     fun <T> execute(call: Call, read: (Response) -> T): T {
         deadline?.let { call.limitToDeadline(it.untilNanos) }
-        activeCall.set(call)
+        activeCalls.add(call)
         try {
             checkActive()
             return call.execute().use(read).also { checkActive() }
@@ -69,7 +69,7 @@ internal class CloudCallCancellation private constructor(
             checkActive()
             throw error
         } finally {
-            activeCall.set(null)
+            activeCalls.remove(call)
         }
     }
 
@@ -79,7 +79,7 @@ internal class CloudCallCancellation private constructor(
             val deadline = currentCoroutineContext()[CloudHttpDeadline]
             return suspendCancellableCoroutine { continuation ->
                 val scope = CloudCallCancellation(continuation, deadline)
-                continuation.invokeOnCancellation { scope.activeCall.get()?.cancel() }
+                continuation.invokeOnCancellation { scope.activeCalls.forEach { it.cancel() } }
                 val result = runCatching { scope.checkActive(); work(scope) }
                 result.fold(continuation::resume, continuation::resumeWithException)
             }

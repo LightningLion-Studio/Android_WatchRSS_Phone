@@ -195,11 +195,29 @@ import org.jsoup.select.NodeTraversor
 import org.jsoup.select.NodeVisitor
 
 class ArticleReaderActivity : ComponentActivity() {
+    private var readerTelemetryScreen: String? = null
+    private var readerTelemetryStartedAt: Long? = null
+    private var readerActivityResumed = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.colorMode = ActivityInfo.COLOR_MODE_HDR
         val articleId = intent.getStringExtra(EXTRA_ARTICLE_ID).orEmpty()
         val repository = (application as PhoneCompanionApplication).container.repository
+        if (articleId.isNotBlank()) {
+            lifecycleScope.launch {
+                val openedArticle = repository.observeArticle(articleId)
+                    .filterNotNull()
+                    .first()
+                readerTelemetryScreen =
+                    if (ImportedContentIds.isImportedContentUrl(openedArticle.url)) {
+                        "novel_reader"
+                    } else {
+                        "article_reader"
+                    }
+                if (readerActivityResumed) startReaderTelemetry()
+            }
+        }
         val readerPresetRepository =
             (application as PhoneCompanionApplication).container.readerPresetRepository
 
@@ -259,6 +277,33 @@ class ArticleReaderActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        readerActivityResumed = true
+        startReaderTelemetry()
+    }
+
+    override fun onPause() {
+        readerActivityResumed = false
+        val screen = readerTelemetryScreen
+        val startedAt = readerTelemetryStartedAt
+        if (screen != null && startedAt != null) {
+            (application as PhoneCompanionApplication).container.usageTelemetry.recordScreenDuration(
+                screen,
+                SystemClock.elapsedRealtime() - startedAt
+            )
+        }
+        readerTelemetryStartedAt = null
+        super.onPause()
+    }
+
+    private fun startReaderTelemetry() {
+        val screen = readerTelemetryScreen ?: return
+        if (!readerActivityResumed || readerTelemetryStartedAt != null) return
+        readerTelemetryStartedAt = SystemClock.elapsedRealtime()
+        (application as PhoneCompanionApplication).container.usageTelemetry.recordScreenOpen(screen)
     }
 
     companion object {

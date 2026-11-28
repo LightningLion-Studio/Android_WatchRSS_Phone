@@ -18,7 +18,7 @@ import java.io.File
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest = Config.NONE, sdk = [35])
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
-class SyncV2MissingBookOriginalTest {
+class SyncV2MissingOriginalTest {
     @Test fun keepLocalPublishesRssAndArticleWhileRetainingBothOrphans() = SyncV2P5Fixture().use { fixture ->
         val oldBook = book("ab", 1)
         val differentBook = book("ab", 2)
@@ -93,7 +93,7 @@ class SyncV2MissingBookOriginalTest {
         val published = checkNotNull(fixture.wire("book", id))
         for (field in SyncV2BodyIdentity.fields) assertEquals(prior.get(field), published.get(field))
         assertEquals("local title", fixture.cloudValue("book", id).getString("title"))
-        assertTrue(fixture.projection.heldBooks().isEmpty())
+        assertTrue(fixture.projection.heldOriginals().isEmpty())
     }
 
     @Test fun normalPublicationHoldsAnOrphanAndCanPublishItOnceTheOriginalReturns() = SyncV2P5Fixture().use { fixture ->
@@ -106,7 +106,7 @@ class SyncV2MissingBookOriginalTest {
         fixture.publishNormally()
         assertNull(fixture.wire("book", id))
         assertEquals("ordinary edit", fixture.cloudValue("note", "note").getString("markdown"))
-        assertEquals(setOf(fixture.identity.entity("book", id)), fixture.projection.heldBooks())
+        assertEquals(setOf(fixture.identity.entity("book", id)), fixture.projection.heldOriginals())
         assertFalse(fixture.projection.state().body.optBoolean("unknownEditBase"))
         assertEquals(emptySet<String>(), fixture.projection.publicationIds())
 
@@ -114,7 +114,95 @@ class SyncV2MissingBookOriginalTest {
         File(fixture.root, "imported_books/$id.jsonl").also { it.parentFile!!.mkdirs(); it.writeBytes(original) }
         fixture.publishNormally(setOf(fixture.identity.entity("book", id)))
         assertNotNull(fixture.wire("book", id))
-        assertTrue(fixture.projection.heldBooks().isEmpty())
+        assertTrue(fixture.projection.heldOriginals().isEmpty())
+    }
+
+    @Test fun keepLocalCommitsAllValidChangesAndHoldsMissingOriginalsAcrossRestart() = SyncV2P5Fixture().use { fixture ->
+        val article = example("article").put("rssSourceUrl", JSONObject.NULL).put("rssSourceTitle", JSONObject.NULL)
+        val articleId = article.getString("articleId")
+        val rss = example("source")
+        fixture.advance(listOf(fixture.note(), article, rss))
+        fixture.start()
+
+        val orphanArticle = JSONObject(article.toString()).put("articleId", "orphan-article")
+            .put("url", "https://example.invalid/orphan-article").put("title", "Local only")
+            .put("contentText", "").put("contentHtml", JSONObject.NULL)
+        val orphanBook = book("34", 1)
+        val markdown = "Local attachment: ![picture](assets/missing.png)"
+        val orphanNote = fixture.note(markdown = markdown).put("noteId", "orphan-note").apply { remove("noteConflicts") }
+        val unregisteredNote = fixture.note(markdown = "![picture](assets/unregistered.png)")
+            .put("noteId", "unregistered-note").apply { remove("noteConflicts") }
+        fixture.insert(orphanBook)
+        val apply = SyncV2PhoneApply(fixture.sql)
+        apply.upsert("phone_articles", listOf("articleId"), orphanArticle)
+        apply.upsert("notes", listOf("noteId"), orphanNote)
+        apply.upsert("notes", listOf("noteId"), unregisteredNote)
+        val attachment = "verified attachment".toByteArray()
+        apply.upsert("note_assets", listOf("assetId"), JSONObject().put("assetId", "private-orphan-asset")
+            .put("noteId", "orphan-note").put("storageKey", "missing.png").put("mimeType", "image/png")
+            .put("sha256", SyncV2BodyCodec.hash(attachment)).put("byteCount", attachment.size))
+        fixture.sql.execSQL("UPDATE phone_articles SET title='kept article',contentText='valid body' WHERE articleId=?", arrayOf(articleId))
+        fixture.sql.execSQL("UPDATE phone_rss_sources SET title='kept RSS' WHERE url=?", arrayOf(rss.getString("url")))
+        fixture.edit("kept note")
+        fixture.projection.requestConcurrentChoice()
+
+        val orphans = mapOf("book" to orphanBook.getString("bookId"), "article" to "orphan-article",
+            "note" to "orphan-note", "asset" to "missing.png")
+        val held = orphans.map { (kind, id) -> fixture.identity.entity(kind, id) }.toSet() +
+            fixture.identity.entity("note", "unregistered-note")
+        fixture.actions().use { actions ->
+            assertTrue(actions.choose(actions.preview(), "local").getBoolean("localCommitted"))
+        }
+        assertEquals(1, fixture.publishCalls)
+        for ((kind, id) in orphans) assertNull(fixture.wire(kind, id))
+        assertNull(fixture.wire("note", "unregistered-note"))
+        assertEquals("kept article", fixture.cloudValue("article", articleId).getString("title"))
+        assertEquals("kept RSS", fixture.cloudValue("source", SyncV2Business.logicalId("source", rss)).getString("title"))
+        assertEquals("kept note", fixture.cloudValue("note", "note").getString("markdown"))
+        assertEquals(markdown, fixture.scalar("SELECT markdown FROM notes WHERE noteId=?", "orphan-note"))
+        assertEquals("Local only", fixture.scalar("SELECT title FROM phone_articles WHERE articleId=?", "orphan-article"))
+        assertEquals("missing.png", fixture.scalar("SELECT storageKey FROM note_assets WHERE assetId=?", "private-orphan-asset"))
+        assertEquals(orphanBook.toString(), fixture.scalar("SELECT stateJson FROM imported_books WHERE bookId=?", orphans.getValue("book")))
+        assertEquals(held, fixture.projection.heldOriginals())
+        assertTrue(fixture.projection.publicationIds().isEmpty())
+
+        fixture.reopen()
+        fixture.actions().use { actions ->
+            actions.refresh()
+            assertTrue(actions.restoredOriginalIds().isEmpty())
+        }
+        assertTrue(fixture.projection.isUnchangedAccount(fixture.projection.state()))
+        assertEquals(1, fixture.publishCalls)
+        fixture.edit("later valid edit")
+        fixture.publishNormally()
+        assertEquals("later valid edit", fixture.cloudValue("note", "note").getString("markdown"))
+        assertEquals(held, fixture.projection.heldOriginals())
+        assertTrue(fixture.projection.publicationIds().isEmpty())
+
+        val file = SyncV2BodyRepository(fixture.sql, fixture.root).file("asset", "missing.png")
+        file.parentFile!!.mkdirs()
+        com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.writeBytes(file, attachment)
+        fixture.actions().use { actions ->
+            actions.refresh()
+            val restored = actions.restoredOriginalIds()
+            assertEquals(setOf(fixture.identity.entity("asset", "missing.png"),
+                fixture.identity.entity("note", "orphan-note")), restored)
+            assertFalse(fixture.projection.state().body.optBoolean("unknownEditBase"))
+            fixture.publishNormally(restored)
+            assertTrue(fixture.projection.state().body.isNull("pendingChoice"))
+            assertEquals(held - restored, fixture.projection.heldOriginals())
+        }
+        assertNotNull(fixture.wire("asset", "missing.png"))
+        assertEquals(markdown, fixture.cloudValue("note", "orphan-note").getString("markdown"))
+
+        fixture.sql.execSQL("UPDATE phone_articles SET contentText='restored body' WHERE articleId='orphan-article'")
+        fixture.drain()
+        fixture.actions().use { actions ->
+            assertEquals(setOf(fixture.identity.entity("article", "orphan-article")), actions.restoredOriginalIds())
+            fixture.publishNormally(actions.restoredOriginalIds())
+        }
+        assertNotNull(fixture.wire("article", "orphan-article"))
+        assertEquals("restored body", fixture.scalar("SELECT contentText FROM phone_articles WHERE articleId=?", "orphan-article"))
     }
 
     private fun example(kind: String): JSONObject {

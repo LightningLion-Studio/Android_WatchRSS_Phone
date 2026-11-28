@@ -1,5 +1,6 @@
 package com.lightningstudio.watchrss.phone.syncv2
 
+import com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -182,7 +183,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
     /** P2 normal publication only. Rollback/choice/history write paths remain closed. */
     fun publishIndex(signer:SyncV2Signing,contentKey:ByteArray,keyVersion:Long,scannedRevision:String?=null,
         resetAdditions:Boolean=false, extraIds:Set<String> = emptySet(),
-        prepareContent: ((Set<String>?) -> Boolean)? = null,
+        prepareContent: ((Set<String>?, Set<String>) -> Boolean)? = null,
         observePublished: ((PublishedDelta?) -> Unit)? = null):JSONObject {
         resumePublish()?.let { observePublished?.invoke(null); return it }
         fun sourceCurrent() {
@@ -208,12 +209,14 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         val sparseRoot = if (resetAdditions) null else projection.sparsePublicationRoot(st)
         val ids = if (sparseRoot == null) null else
             (projection.publicationIds() + projection.publicationMergeIds() + extraIds).takeIf { it.size <= 64 }
-        val originals=files?.let{SyncV2BodyRepository(projection.accountDatabase,it)}
-        val localIndex = projection.prepareWireIndex(signer, contentKey, keyVersion, resetAdditions, ids) { id,value ->
-            originals?.committedBook(id,value)!=null
-        }
+        val fileRevision = files?.let(CloudExportFileWitness::captureForProjection)
+        val recovery = files?.let { SyncV2RecoveryStorage(projection,identity,it) }
+        val localIndex = projection.prepareWireIndex(signer, contentKey, keyVersion, resetAdditions, ids,
+            recovery?.let { storage -> { record, prior ->
+                storage.publicationFailure(record,prior)?.also { if (!storage.isMissingOriginal(it)) throw it }
+            } })
         try {
-        val preparedBodies = if (prepareContent?.invoke(ids) == true) {
+        val preparedBodies = if (prepareContent?.invoke(ids, localIndex.heldOriginals) == true) {
             sourceCurrent()
             projection.wirePublicationIds()
         } else emptySet()
@@ -235,8 +238,8 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
             val meta=cloud.getJSONObject("meta");val entity=meta.getString("entityKey")
             val row = cloud.getJSONObject("row")
             if (ids != null) previousWire[entity] = row
-            if(entity in localIndex.heldBooks || cloud.has(SyncV2NoteWiring.ISOLATED_KEY)) {
-                // An isolated note or a held book cannot replace this authenticated row.
+            if(entity in localIndex.heldOriginals || cloud.has(SyncV2NoteWiring.ISOLATED_KEY)) {
+                // An isolated note or a held local version cannot replace this authenticated row.
                 mergedRows[entity]=row
                 continue
             }
@@ -354,7 +357,9 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         val id=randomId();val old=if(account.isNull("commitOid"))null else account.getString("commitOid")
         val request=JSONObject().put("account",SyncV2CloudClient.refUpdate(signer,identity.scope,"refs/account/current",old,account.getString("revision"),oid,id,now()))
             .put("device",SyncV2CloudClient.refUpdate(signer,identity.scope,"refs/devices/${signer.deviceId}/index",own,revision,oid,id,now())).put("relayGrant",JSONObject.NULL)
-        projection.persistPublish(request,publishState.version,localIndex.heldBooks)
+        fun persist() = projection.persistPublish(request,publishState.version,localIndex.heldOriginals)
+        if (files != null && fileRevision != null) CloudExportFileWitness.withProjectionCapture(files,fileRevision,::persist)
+        else persist()
         val response = publishAttempt(request)
         projection.confirmPublish(request,response)
         if (observePublished != null) {

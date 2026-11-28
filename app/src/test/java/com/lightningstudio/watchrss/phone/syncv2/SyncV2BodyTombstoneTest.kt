@@ -28,9 +28,15 @@ class SyncV2BodyTombstoneTest {
    val client=f.f.client();val cloud=SyncV2CloudSync(client,f.identity,f.projection,{true},{f.key},{f.f.now},f.root);val entity=f.identity.entity(kind,id)
    if(description!="missing") {
     write(false)
-    val seed=if(kind=="book")f.seedBookOriginal(id,"seed book original".toByteArray())else null
+    val bytes="seed original".toByteArray()
+    val seed=if(kind=="book") f.seedBookOriginal(id,bytes) else SyncV2BodyRepository(f.sql,f.root).file("asset",id).also {
+     it.parentFile!!.mkdirs()
+     it.writeBytes(bytes)
+     f.edit("![asset](assets/$id)")
+     f.sql.execSQL("UPDATE note_assets SET sha256=?,byteCount=? WHERE storageKey=?",arrayOf(SyncV2BodyCodec.hash(bytes),bytes.size,id))
+    }
     f.drain();cloud.publishIndex(f.f.signer,f.key,1);f.actions().refresh()
-    seed?.let{check(it.delete())}
+    check(seed.delete())
     if(description!="promise") {
      // Authenticate a new account tree with unchanged business state. The body descriptor
      // can change independently, and its bytes can still be unavailable on this phone.

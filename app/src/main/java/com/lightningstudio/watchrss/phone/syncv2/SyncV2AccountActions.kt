@@ -157,9 +157,9 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         } else null
         val before=projection.accountLocalRows(sparseIds)
         val remote = cloudRows(sparseIds).let { if (sparseIds != null && sparseIds.size <= 4) it.toList() else it }
-        val target=business.effective(before,remote,st.body.optJSONObject("appliedAccount")?.optString("generation")?.let{it!=a.getString("generation")}?:false)
+        val target=business.effective(withoutHeldOriginals(before,projection.heldOriginals(st)),remote,st.body.optJSONObject("appliedAccount")?.optString("generation")?.let{it!=a.getString("generation")}?:false)
         business.validate(target)
-        val held=projection.retainedBooks(st,before,target)
+        val held=projection.retainedOriginals(st,before,target)
         val endangered=endangeredBodies(before,target)-held
         if(endangered.isNotEmpty()) {
             fileGuard(fileToken){projection.accountProtectPendingBodies(st.version,endangered)}
@@ -167,7 +167,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         }
         fileGuard(fileToken){ projection.accountWriter(st.version){current->
             val rss=business.apply(before,target,held);fault("business-applied")
-            projection.accountApplied(current,a,target,id(),before,rss,sparseIds=sparseIds,heldBooks=held)
+            projection.accountApplied(current,a,target,id(),before,rss,sparseIds=sparseIds,heldOriginals=held)
             if(signing!=null)current.body.put("pendingAppliedAck",JSONObject().put("requestId",id()).put("commitOid",a.getString("oid")).put("deviceId",signer.deviceId).put("refRevision",a.getString("revision")).put("rollbackGeneration",a.getString("generation")))
         }
         }
@@ -225,7 +225,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         val selectedLegacyKeys:List<String> = java.util.Collections.unmodifiableList(ArrayList(keys))
         companion object {internal fun create(c:ChoiceCapture,yes:Boolean,reason:String?,keys:List<String> = emptyList())=Preview(c,yes,reason,keys)}
     }
-    private data class Plan(val local:List<JSONObject>,val cloud:List<JSONObject>,val input:List<JSONObject>,val candidate:List<JSONObject>?,val digest:String,val ids:Set<String>,val files:JSONObject,val actual:List<JSONObject>,val actualIds:Set<String>,val legacySelected:String,val legacyProposals:String,val root:String?=null,val scopeIds:Set<String> = emptySet(),val heldBooks:Set<String> = emptySet())
+    private data class Plan(val local:List<JSONObject>,val cloud:List<JSONObject>,val input:List<JSONObject>,val candidate:List<JSONObject>?,val digest:String,val ids:Set<String>,val files:JSONObject,val actual:List<JSONObject>,val actualIds:Set<String>,val legacySelected:String,val legacyProposals:String,val root:String?=null,val scopeIds:Set<String> = emptySet(),val heldOriginals:Set<String> = emptySet())
     private val plans=java.util.Collections.synchronizedMap(java.util.WeakHashMap<Preview,Plan>())
     private val transientRows=mutableListOf<AutoCloseable>()
     private fun rowMap()=SyncV2RowMap(db,{projection.accountSeal("preview-row",it)},{projection.accountOpen("preview-row",it)}).also{transientRows.add(it)}
@@ -340,19 +340,18 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         val isolatedIds=remote.filterRows{it.has(SyncV2NoteWiring.ISOLATED_KEY)}.map{it.getJSONObject("meta").getString("entityKey")}.toSet()
         val localBy=local.indexRows();val remoteBy=remote.indexRows();val actualBy=actual.indexRows()
         val held=linkedSetOf<String>()
-        for(entity in projection.accountBookCandidateIds(if(root==null)null else scopeIds)) {
+        val bodyRepository = SyncV2BodyRepository(db, files)
+        val alreadyHeld = projection.heldOriginals(st)
+        for(entity in projection.accountOriginalCandidateIds(if(root==null)null else scopeIds) - isolatedIds) {
             val record=localBy[entity] ?: continue
-            val meta=record.getJSONObject("meta")
-            if(record.getJSONObject("value").getBoolean("deleted"))continue
-            val prior=remoteBy[entity]
-            if(sameRecord(record,prior) || SyncV2BodyIdentity.preservesBook(meta,prior))continue
-            // Only a Room candidate can be retained this way. A different legacy proposal
-            // still needs its guarded archive/recovery path before it can be acknowledged.
+            // Legacy proposals still require their guarded archive/recovery path.
             if(entity in legacy.ids && !sameRecord(record,actualBy[entity]))continue
-            val failure=recovery.contentFailure(record) ?: continue
-            if(!recovery.isMissingBookOriginal(failure))continue
+            val failure=recovery.publicationFailure(record, remoteBy[entity]) { key ->
+                bodyRepository.prepareNoteAssetRegistration(key)
+            } ?: continue
+            if(!recovery.isMissingOriginal(failure))continue
             held.add(entity)
-            SyncV2ChoiceDiagnostics.warn("preview.bookOriginal",failure,meta,"book_original_missing")
+            if (entity !in alreadyHeld) logIsolation("preview.contentReady", record, failure)
         }
         val excluded=isolatedIds+held
         val planningIds=(changed-excluded)+(local.asSequence()+remote.asSequence()).filter{!excluded.contains(it.getJSONObject("meta").getString("entityKey"))&&it.getJSONObject("meta").getString("kind")=="note"}.map{it.getJSONObject("meta").getString("entityKey")}.toSet()
@@ -399,12 +398,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
                     val fields=if(l==null||b==null)emptyList()else (l.keys().asSequence().toSet()+b.keys().asSequence().toSet()).filter{it!="identity"&&!same(l.opt(it),b.opt(it))}.sorted()
                     val kind=when{l==null->"delete";b==null->"create";l.optJSONObject("lifecycle")?.getLong("generation")?.let{it>(b.optJSONObject("lifecycle")?.getLong("generation")?:0)}==true->"explicit-restore";else->"update"}
                     val complete = l == null || localBy[entity]?.let { record ->
-                        val prior=remoteBy[entity]
-                        val meta=record.getJSONObject("meta")
-                        val reusableBook=meta.getString("kind")=="book" &&
-                            (sameRecord(record,prior) || SyncV2BodyIdentity.preservesBook(meta,prior))
-                        val failure = if (reusableBook || remoteArticleWithRecipe(record, prior) != null) null
-                            else recovery.contentFailure(record)
+                        val failure = recovery.publicationFailure(record, remoteBy[entity])
                         if (failure != null) {
                             incompleteCount++
                             if (firstIncomplete == null) firstIncomplete = record.getJSONObject("meta") to failure
@@ -429,10 +423,13 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         }
         firstIncomplete?.let { (meta, error) ->
             SyncV2ChoiceDiagnostics.warn("preview.contentReady", error, meta,
-                recovery.contentFailureReason(error), incompleteCount)
+                SyncV2RecoveryStorage.contentFailureReason(error), incompleteCount)
         }
         channelGuard(inputs)?.let{reason=it}
         if(missing)reason="missing_base"
+        // An explicit local choice can retain an incomplete edit outside the tree.
+        // The merge option must not claim that such an edit was merged.
+        if (reason == null && held.any { it in changed }) reason = "missing_content"
         var candidate:List<JSONObject>?=null
         if(reason==null) {
             val untouched=remote.indices.filter{remote[it].getJSONObject("meta").getString("entityKey") !in planningIds}.mapRows{snapshotRow(remote[it],"target")}
@@ -453,7 +450,24 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             throw e
         } finally{prunePreviewSpools();transientRows.forEach{it.close()};transientRows.clear()}
     }
-    private fun syncFiles(){projection.accountFilesObserved(fileCapture())}
+    private fun syncFiles() {
+        projection.accountFilesObserved(fileCapture()) { restoredOriginalIds(allowRegistration = true).isNotEmpty() }
+    }
+
+    internal fun restoredOriginalIds(allowRegistration: Boolean = false): Set<String> {
+        val held = projection.heldOriginals()
+        if (held.isEmpty()) return emptySet()
+        val localOnly = held - projection.cloudRows(held).indexRows().keys
+        val registrations: ((String) -> Unit)? = if (allowRegistration) {
+            val repository = SyncV2BodyRepository(db, files)
+            val validate: (String) -> Unit = { key -> repository.prepareNoteAssetRegistration(key) }
+            validate
+        } else null
+        return projection.accountLocalRows(localOnly).filter { record ->
+            !record.getJSONObject("value").getBoolean("deleted") &&
+                recovery.publicationFailure(record, null, registrations) == null
+        }.indexRows().keys
+    }
     internal fun foregroundVersion():String {
         syncFiles()
         return projection.state().version
@@ -475,14 +489,8 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             same(prior.getJSONObject("state"),record.getJSONObject("state"))
 
     private fun bodyIdentity(r:JSONObject):String=SyncV2BodyIdentity.witness(r.getJSONObject("meta"))
-    /** A promise or a legacy row without a recipe does not prove that the article was uploaded. */
-    private fun remoteArticleWithRecipe(record: JSONObject, remote: JSONObject?): JSONObject? {
-        val meta = record.getJSONObject("meta")
-        if (meta.getString("kind") != "article" || remote == null ||
-            meta.getJSONObject("payload").optString("contentHash").isBlank() ||
-            !SyncV2BodyIdentity.same(meta, remote)) return null
-        val row = remote.optJSONObject("row") ?: return null
-        return remote.takeIf { !row.getBoolean("deleted") && !row.isNull("recipeOid") }
+    private fun logIsolation(stage: String, record: JSONObject, failure: Exception) {
+        SyncV2ChoiceDiagnostics.warn(stage, failure, record.getJSONObject("meta"), SyncV2RecoveryStorage.contentFailureReason(failure))
     }
 
     private fun endangeredBodies(before:List<JSONObject>,target:List<JSONObject>):Set<String> {
@@ -521,7 +529,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
                 noteMetadata[entity]=JSONObject().also{out->for(key in listOf(SyncV2NoteWiring.SEGMENTS_KEY,SyncV2NoteWiring.REFS_MAPS_KEY,SyncV2NoteWiring.REVISION_KEY))if(remote.has(key))out.put(key,remote.get(key))}
                 rows.add(row);r.put("row",row).remove("wire");continue
             }
-            if(kind !in setOf("article","asset") && remote!=null && sameRecord(r,remote)) {
+            if(remote!=null && sameRecord(r,remote)) {
                 val row=remote.getJSONObject("row")
                 if(sparseRoot==null)for(field in listOf("metaOid","stateOid")) {
                     val oid=row.getString(field);val bytes=raw(oid)
@@ -531,11 +539,8 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
                 noteMetadata[entity]=JSONObject().also{out->for(key in listOf(SyncV2NoteWiring.SEGMENTS_KEY,SyncV2NoteWiring.REFS_MAPS_KEY,SyncV2NoteWiring.REVISION_KEY))if(remote.has(key))out.put(key,remote.get(key))}
                 rows.add(row);r.put("row",row).remove("wire");continue
             }
-            if(kind=="book" && !SyncV2BodyIdentity.preservesBook(m,remote)) {
-                // The planner can select a different body than the local input. Verify
-                // the actual candidate before making a new independent reference.
-                recovery.contentFailure(r)?.let{throw it}
-            }
+            // The planner can select a different body from the preview input.
+            recovery.publicationFailure(r, remote)?.let { throw it }
             if(kind=="note" && SyncV2NoteConflicts.declared(r.getJSONObject("value"))==null)SyncV2Codec.fail("merge_unavailable")
             val known=projection.accountBinding(entity)
             fun part(type:String,plain:JSONObject):String {
@@ -579,9 +584,8 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             val deleted=r.getJSONObject("value").optBoolean("deleted",false)
             val source=when {
                 deleted -> remote
-                kind=="book" && SyncV2BodyIdentity.preservesBook(m,remote) -> remote
-                kind=="asset" && SyncV2BodyIdentity.same(m,remote) -> remote
-                else -> remoteArticleWithRecipe(r, remote) ?: bodySources.maxWithOrNull(
+                SyncV2BodyIdentity.reusable(m,remote) -> remote
+                else -> bodySources.maxWithOrNull(
                     compareBy<JSONObject>{!it.getJSONObject("row").isNull("recipeOid")}
                         .thenBy{SyncV2Codec.d64(it.getJSONObject("row").getString("rowSequence"))})
             }
@@ -683,10 +687,35 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         projection.checkLegacySelection(JSONArray(plan.legacySelected))
         fileGuard(plan.files){}
         val context=context(c, choice);val local=rows(plan.local);val remote=rows(plan.cloud)
-        // Carry authenticated isolated notes and old versions of held books verbatim.
-        // A held book with no current cloud row stays outside the publication tree.
-        val isolatedRemote=remote.filterRows{it.has(SyncV2NoteWiring.ISOLATED_KEY) || it.getJSONObject("meta").getString("entityKey") in plan.heldBooks}
-        val isolatedEntityKeys=isolatedRemote.indexRows().keys+plan.heldBooks
+        val registrations = linkedMapOf<String,SyncV2BodyRepository.NoteAssetRegistration>()
+        val bodyRepository = SyncV2BodyRepository(db, files)
+        val held = plan.heldOriginals.toMutableSet()
+        if (choice == "local") {
+            val byEntity = remote.indexRows()
+            val actual = rows(plan.actual).indexRows()
+            // Recheck the selected rows before staging, including legacy proposals.
+            for (record in local) {
+                val entity = record.getJSONObject("meta").getString("entityKey")
+                if (entity in held) continue
+                val noteRegistrations = linkedMapOf<String,SyncV2BodyRepository.NoteAssetRegistration>()
+                val failure = recovery.publicationFailure(record, byEntity[entity]) { key ->
+                    if (key !in registrations) noteRegistrations.getOrPut(key) {
+                        bodyRepository.prepareNoteAssetRegistration(key)
+                    }
+                }
+                if (failure == null) {
+                    registrations.putAll(noteRegistrations)
+                } else {
+                    logIsolation("prepareChoice.contentReady", record, failure)
+                    if (!recovery.isMissingOriginal(failure) || !sameRecord(record, actual[entity])) throw failure
+                    held.add(entity)
+                }
+            }
+        }
+        val selectedPlan = plan.copy(heldOriginals = held)
+        // Reuse authenticated rows verbatim. A local-only orphan is absent from the tree.
+        val isolatedRemote=remote.filterRows{it.has(SyncV2NoteWiring.ISOLATED_KEY) || it.getJSONObject("meta").getString("entityKey") in held}
+        val isolatedEntityKeys=isolatedRemote.indexRows().keys+held
         val withoutIsolated=fun(rows:List<JSONObject>)=rows.filterRows{it.getJSONObject("meta").getString("entityKey") !in isolatedEntityKeys}
         val target=when(choice){"cloud"->remote;"local"->isolatedRemote.plusRows(withoutIsolated(local));else->isolatedRemote.plusRows(withoutIsolated(rows(plan.candidate?:SyncV2Codec.fail("choice_stale"))))}
         business.validate(target.filterRows{it.has("value")})
@@ -731,32 +760,9 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             }
             recovery.checkBundles(bundles)
         }
-        val registrations = linkedMapOf<String,SyncV2BodyRepository.NoteAssetRegistration>()
-        val bodyRepository = SyncV2BodyRepository(db, files)
-        if(choice=="local") {
-            val byEntity=remote.indexRows()
-            for(r in withoutIsolated(local)) {
-                val meta = r.getJSONObject("meta")
-                val prior = byEntity[meta.getString("entityKey")]
-                val changed = prior == null || !same(prior.getJSONObject("meta"), meta) ||
-                    !same(prior.getJSONObject("state"), r.getJSONObject("state"))
-                if (!changed) continue
-                if (meta.getString("kind") == "book") continue
-                if (meta.getString("kind") == "asset" && SyncV2BodyIdentity.same(meta,prior)) continue
-                if (remoteArticleWithRecipe(r, prior) != null) continue
-
-                val failure = recovery.contentFailure(r) { key ->
-                    registrations.getOrPut(key) { bodyRepository.prepareNoteAssetRegistration(key) }
-                } ?: continue
-                val error = SyncV2ProtocolError("closure_incomplete", failure)
-                SyncV2ChoiceDiagnostics.warn("prepareChoice.contentReady", error, meta,
-                    recovery.contentFailureReason(failure))
-                throw error
-            }
-        }
         val captured = if (choice=="cloud") null else if (plan.actual===plan.local) local else rows(plan.actual)
         if (registrations.isEmpty()) {
-            stageChoice(c, choice, keyVersion, context, plan, target, remote, captured, bundles)
+            stageChoice(c, choice, keyVersion, context, selectedPlan, target, remote, captured, bundles)
         } else {
             val requestId = id()
             fileGuard(plan.files) {
@@ -782,7 +788,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
                     } else emptyList()
                     val selected = untouched.plusRows(target.filterRows { it.getJSONObject("meta").getString("entityKey") !in assetIds }).plusRows(assets)
                     val captureRows = actual.filterRows { it.getJSONObject("meta").getString("entityKey") !in assetIds }.plusRows(assets)
-                    val expanded = plan.copy(root=if (full) null else plan.root, scopeIds=expandedIds)
+                    val expanded = selectedPlan.copy(root=if (full) null else plan.root, scopeIds=expandedIds)
                     stageChoice(c, choice, keyVersion, context, expanded, selected, cloud, captureRows, bundles, st,requestId)
                     for (asset in registrations.values) asset.requireCurrent()
                     projection.accountCheckOwner()
@@ -794,10 +800,28 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
     }
 
     private fun stageChoice(c: ChoiceCapture, choice: String, keyVersion: Long, context: Context, plan: Plan,
-        target: List<JSONObject>, remote: List<JSONObject>, captured: List<JSONObject>?,
+        selection: List<JSONObject>, remote: List<JSONObject>, captured: List<JSONObject>?,
         bundles: List<SyncV2RecoveryStorage.Bundle>, writerState: SyncV2Projection.State? = null, requestId: String = id()) {
+        val held = plan.heldOriginals.toMutableSet()
+        val target = if (choice != "local") selection else {
+            val prior = remote.indexRows()
+            val actual = requireNotNull(captured).indexRows()
+            val removed = linkedSetOf<String>()
+            for (record in selection) {
+                val entity = record.getJSONObject("meta").getString("entityKey")
+                if (entity in held) continue
+                val failure = recovery.publicationFailure(record, prior[entity]) ?: continue
+                logIsolation("stageChoice.contentReady", record, failure)
+                if (!recovery.isMissingOriginal(failure) || !sameRecord(record, actual[entity])) throw failure
+                held.add(entity)
+                removed.add(entity)
+            }
+            if (removed.isEmpty()) selection else selection.filterRows {
+                it.getJSONObject("meta").getString("entityKey") !in removed
+            }.plusRows(remote.filterRows { it.getJSONObject("meta").getString("entityKey") in removed })
+        }
         val action=JSONObject().put("id",requestId).put("kind",choice).put("capture",c.json()).put("serverTime",now()).put("fileCapture",plan.files).put("legacySelected",JSONArray(plan.legacySelected))
-        if(choice!="cloud" && plan.heldBooks.isNotEmpty())action.put("heldBooks",JSONArray(plan.heldBooks.sorted()))
+        if(choice!="cloud" && held.isNotEmpty())action.put("heldOriginals",JSONArray(held.sorted()))
         if(plan.root!=null)action.put("sparseBaseRoot",plan.root).put("sparseIds",JSONArray(plan.scopeIds.sorted()))
         val index=if(choice=="cloud")null else wireIndex(target,keyVersion,remote,plan.root,plan.scopeIds,context.authors, "stageChoice.wireIndex")
         try {
@@ -1156,7 +1180,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             cloudRows(sparseIds)
         }else stagedRows(id)
         business.validate(target);val before=projection.accountLocalRows(sparseIds);val bundles=preparedRecoveries(action,objects)
-        val held=projection.retainedBooks(latest,before,target,actionHeldBooks(action))
+        val held=projection.retainedOriginals(latest,before,target,actionHeldOriginals(action))
         val endangered=if(kind=="rollback")endangeredBodies(before,target)-held else emptySet()
         val proof=if(kind=="cloud")null else {
             val authors=client.authors(identity,approved);val saved=st.body.getJSONArray("signingBindings");for(i in 0 until saved.length())authors.restorePinned(saved.getJSONObject(i))
@@ -1173,7 +1197,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
                 for(bundle in bundles)recovery.commit(bundle)
                 fault("recovery-pinned")
                 val rss=business.apply(before,target,held);fault("business-applied")
-                projection.accountApplied(current,observed,target,id,before,rss,sparseIds=sparseIds,heldBooks=held)
+                projection.accountApplied(current,observed,target,id,before,rss,sparseIds=sparseIds,heldOriginals=held)
                 projection.accountResolveLegacy(current,action.optJSONArray("legacySelected")?:JSONArray(),kind)
                 current.body.put("pendingAppliedAck",JSONObject().put("requestId",this.id()).put("commitOid",observed.getString("oid")).put("deviceId",signer.deviceId).put("refRevision",observed.getString("revision")).put("rollbackGeneration",observed.getString("generation")))
             }
@@ -1181,17 +1205,17 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             if(kind!="cloud") {
                 if(sparseIds==null)projection.accountReplaceMetadata(current,observed,target,objects.selectObjects{it.substringBefore(':') in setOf("meta","state","tree","commit","state-refs")},response.getString("serverRevision"))
                 else SyncV2AccountSparseMetadata(projection).replace(current,observed,action.getJSONObject("envelope").getJSONObject("body").getString("treeRoot"),sparseIds,target,objects,SyncV2Wire.strings(action.getJSONArray("retiredTrees"),10000,false).toSet(),response.getString("serverRevision"))
-                if(kind in setOf("local","merge"))projection.accountStoreOwnWireRows(withoutHeldBooks(target,held),if(sparseIds==null)projection.cloudObjects()else SyncV2AccountSparseMetadata(projection).objects(target,objects),objects.keys)
+                if(kind in setOf("local","merge"))projection.accountStoreOwnWireRows(withoutHeldOriginals(target,held),if(sparseIds==null)projection.cloudObjects()else SyncV2AccountSparseMetadata(projection).objects(target,objects),objects.keys)
             }
             current.body.put("accountActionReceipt",JSONObject().put("id",id).put("kind",kind).put("account",observed)).remove("pendingAccountAction")
             clearStaged(id);fault("before-account-commit")
         }}
         fault("after-account-commit");runCatching{flushAppliedAck()};return response.put("localCommitted",true).put("appliedAckPending",!projection.state().body.isNull("pendingAppliedAck"))
     }
-    private fun actionHeldBooks(action:JSONObject):Set<String> =
-        action.optJSONArray("heldBooks")?.let{SyncV2Wire.strings(it,1000000,false).toSet()}.orEmpty()
+    private fun actionHeldOriginals(action:JSONObject):Set<String> =
+        (action.optJSONArray("heldOriginals") ?: action.optJSONArray("heldBooks"))?.let{SyncV2Wire.strings(it,1000000,false).toSet()}.orEmpty()
 
-    private fun withoutHeldBooks(rows:List<JSONObject>,held:Set<String>):List<JSONObject> =
+    private fun withoutHeldOriginals(rows:List<JSONObject>,held:Set<String>):List<JSONObject> =
         if(held.isEmpty())rows else rows.filterRows{it.getJSONObject("meta").getString("entityKey") !in held}
 
     private fun clearStaged(id:String) {for(t in listOf("syncv2_p5_objects","syncv2_p5_rows"))db.execSQL("DELETE FROM $t WHERE scope=? AND action_id=?",arrayOf(scope,id))}
@@ -1229,7 +1253,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         if(st.body.optBoolean("unknownEditBase") && !same(fileToken,action.getJSONObject("fileCapture")))return result.put("tailReconciliationPending",true).put("reason","missing_content")
         val target=stagedRows(id,expand=true);val captured=stagedRows(id,"capture",true);val actual=projection.accountLocalRows()
         val capturedBy=captured.indexRows();val actualBy=actual.indexRows();val targetBy=target.indexRows()
-        val held=projection.retainedBooks(st,actual,target,actionHeldBooks(action))
+        val held=projection.retainedOriginals(st,actual,target,actionHeldOriginals(action))
         val isolated=target.filterRows{it.has(SyncV2NoteWiring.ISOLATED_KEY) || it.getJSONObject("meta").getString("entityKey") in held}
         val isolatedIds=isolated.indexRows().keys+held
         val rebased=SyncV2RowSpool(db,{projection.accountSeal("prefix-row",it)},{projection.accountOpen("prefix-row",it)}).also{transientRows.add(it)}
@@ -1272,10 +1296,10 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             if(!same(current.body.optJSONObject("pendingAccountAction"),action) || current.revision!=st.revision)SyncV2Codec.fail("choice_stale")
             if(proof!=null)projection.accountAdopt(current,published,proof)
             val rss=business.apply(actual,rebased,held);fault("business-applied")
-            projection.accountApplied(current,published,target,id,actual,rss,capture.localChangeRevision,virtualBaseline=true,heldBooks=held)
+            projection.accountApplied(current,published,target,id,actual,rss,capture.localChangeRevision,virtualBaseline=true,heldOriginals=held)
             if(proof!=null) {
                 projection.accountReplaceMetadata(current,published,target,objects.selectObjects{it.substringBefore(':') in setOf("meta","state","tree","commit","state-refs")},response.getString("serverRevision"))
-                projection.accountStoreOwnWireRows(withoutHeldBooks(target,held),projection.cloudObjects(),objects.keys)
+                projection.accountStoreOwnWireRows(withoutHeldOriginals(target,held),projection.cloudObjects(),objects.keys)
             }
             projection.accountRetainTail(current,published,rebased,changed)
             projection.accountResolveLegacy(current,action.optJSONArray("legacySelected")?:JSONArray(),kind)

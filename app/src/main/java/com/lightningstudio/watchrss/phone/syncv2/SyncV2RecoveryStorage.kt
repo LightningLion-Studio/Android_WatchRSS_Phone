@@ -71,8 +71,6 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
     private fun missingSource(reason: String, cause: Throwable? = null): Nothing =
         throw SyncV2ProtocolError("closure_incomplete", MissingSource(reason, cause))
 
-    fun contentFailureReason(error: Exception): String =
-        (error.cause as? MissingSource)?.reason ?: "source_check_failed"
 
     private fun sources(record:JSONObject,maxBytes:Long?=null,onUnregisteredNoteAsset:((String)->Unit)?=null):List<Pair<String,Source>> {
         val m=record.getJSONObject("meta");val id=m.getString("logicalId");val value=record.getJSONObject("value")
@@ -81,11 +79,7 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
             "article"->{
                 // CursorWindow must never hold a whole imported body. Read bounded BLOB slices,
                 // then preserve both original text fields in the private recovery envelope.
-                val lengths=db.query("SELECT length(CAST(contentText AS BLOB)),length(CAST(contentHtml AS BLOB)),contentHash FROM phone_articles WHERE articleId=?",arrayOf(id)).use{c->
-                    if (!c.moveToFirst()) missingSource("article_row_missing")
-                    if (value.optString("contentHash") != c.getString(2)) missingSource("article_hash_mismatch")
-                    c.getLong(0) to if(c.isNull(1))null else c.getLong(1)
-                }
+                val lengths=articleLengths(id, value)
                 if(lengths.first+(lengths.second?:0)>quotaBytes)SyncV2Codec.fail("quota_exceeded")
                 fun text(column:String,length:Long):String {
                     val out=java.io.ByteArrayOutputStream();var offset=0L
@@ -96,8 +90,6 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
                     }
                     return out.toByteArray().toString(Charsets.UTF_8)
                 }
-                if (lengths.first == 0L && (lengths.second ?: 0) == 0L && value.optString("contentHash").isNotEmpty())
-                    missingSource("article_body_empty")
                 val bytes=SyncV2Codec.utf8(SyncV2Codec.canonical(JSONObject().put("contentText",text("contentText",lengths.first)).put("contentHtml",lengths.second?.let{text("contentHtml",it)}?:JSONObject.NULL)))
                 listOf("article" to byteSource(bytes))
             }
@@ -111,10 +103,7 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
                 listOf("asset/$id" to fileSource(original))
             }
             "note"->{
-                val texts=mutableListOf(value.getString("markdown"),value.getString("baseMarkdown"));SyncV2NoteConflicts.declared(value)?.getJSONArray("records")?.let { conflicts ->
-                    for(i in 0 until conflicts.length())for(field in listOf("baseMarkdown","localMarkdown","remoteMarkdown"))texts.add(conflicts.getJSONObject(i).getString(field))
-                }
-                val keys=texts.flatMap{com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload.referencedStorageKeys(it)}.toSortedSet()
+                val keys=SyncV2BodyRepository.noteReferences(value).sorted()
                 keys.mapNotNull {name->
                     if (!SyncV2NoteAssetNames.exists(db, name) && onUnregisteredNoteAsset != null) {
                         try {
@@ -142,8 +131,51 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
             else->false
         }
     }
-    fun isMissingBookOriginal(error: Exception): Boolean =
-        contentFailureReason(error) == "book_original_missing"
+    private fun articleLengths(id: String, value: JSONObject, requireBody: Boolean = false): Pair<Long, Long?> =
+        db.query("SELECT length(CAST(contentText AS BLOB)),length(CAST(contentHtml AS BLOB)),contentHash FROM phone_articles WHERE articleId=?", arrayOf(id)).use { rows ->
+            if (!rows.moveToFirst()) missingSource("article_row_missing")
+            val hash = value.optString("contentHash")
+            if (hash != rows.getString(2)) missingSource("article_hash_mismatch")
+            val text = rows.getLong(0)
+            val html = if (rows.isNull(1)) null else rows.getLong(1)
+            if (text == 0L && (html ?: 0L) == 0L && (requireBody || hash.isNotEmpty())) missingSource("article_body_empty")
+            text to html
+        }
+
+    fun isMissingOriginal(error: Exception): Boolean = error.cause is MissingSource
+
+    /** Check publication without reading the whole article or applying the recovery-copy quota. */
+    fun publicationFailure(record: JSONObject, prior: JSONObject?,
+        onUnregisteredNoteAsset: ((String) -> Unit)? = null): Exception? {
+        if (record.has(SyncV2NoteWiring.ISOLATED_KEY) || prior?.has(SyncV2NoteWiring.ISOLATED_KEY) == true) return null
+        val meta = record.getJSONObject("meta")
+        val state = record.getJSONObject("state")
+        val kind = meta.getString("kind")
+        if (kind !in SyncV2BodyIdentity.originalKinds || state.getJSONObject("payload").optBoolean("deleted") ||
+            SyncV2BodyIdentity.reusable(meta, prior) ||
+            prior != null && SyncV2LocalJson.canonical(meta) == SyncV2LocalJson.canonical(prior.getJSONObject("meta")) &&
+                SyncV2LocalJson.canonical(state) == SyncV2LocalJson.canonical(prior.getJSONObject("state"))) return null
+        if (kind != "article") return contentFailure(record, onUnregisteredNoteAsset)
+        return try {
+            val id = meta.getString("logicalId")
+            articleLengths(id, record.getJSONObject("value"), requireBody = true)
+            val marker = db.query("SELECT substr(contentText,1,256),substr(contentHtml,1,256) FROM phone_articles WHERE articleId=?", arrayOf(id)).use { rows ->
+                if (!rows.moveToFirst()) missingSource("article_row_missing")
+                com.lightningstudio.watchrss.phone.data.local.articleContentMarkerFileName(
+                    rows.getString(0).takeUnless(String::isEmpty) ?: rows.getString(1).orEmpty())
+            }
+            if (marker != null) {
+                val directory = File(files, "imported_text").canonicalFile
+                val original = File(directory, marker).canonicalFile
+                if (original.parentFile != directory || !original.isFile || original.length() == 0L)
+                    missingSource("article_original_missing")
+            }
+            null
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            e
+        }
+    }
 
     fun contentReady(record: JSONObject): Boolean = contentFailure(record) == null
 
@@ -458,6 +490,8 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
     }
 
     companion object {
+        fun contentFailureReason(error: Exception): String =
+            (error.cause as? MissingSource)?.reason ?: "source_check_failed"
         internal fun guardedAlreadyPresent(db: SupportSQLiteDatabase, files: File,
             originals: SyncV2BodyRepository, link: JSONObject,
             read: (String, Long, Long, Int) -> ByteArray): Boolean {

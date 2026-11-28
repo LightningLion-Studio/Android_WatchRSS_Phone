@@ -490,7 +490,8 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
                 return@withinBudget false
             }
             val localDirty=unacknowledged || st.body.isNull("activeGeneration")
-            val bodyPublications = if (contentEnabled) bodies?.pendingPublications().orEmpty() else emptySet()
+            val restoredOriginals = actions.restoredOriginalIds()
+            val bodyPublications = restoredOriginals + if (contentEnabled) bodies?.pendingPublications().orEmpty() else emptySet()
             val dirty = localDirty || bodyPublications.isNotEmpty() || projection.publicationIds().isNotEmpty()
             if(dirty) {
                 val publicationRevision=st.revision
@@ -501,13 +502,13 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
                 actions.prepareSigning()
                 cloud.publishIndex(vault.signer, keys.read(keys.newestVersion), keys.newestVersion,
                     publicationRevision, resetAdditions, bodyPublications,
-                    prepareContent = if (contentEnabled) { ids ->
+                    prepareContent = if (contentEnabled) { ids, held ->
                         val contentIds = ids?.filterTo(linkedSetOf()) {
                             projection.accountCatalog.kindOf(it) in setOf("article", "book", "asset")
                         }
                         if (contentIds?.isEmpty() == true) false else {
-                            bodies?.bindPrepared(contentIds)
-                            if (client.contentWriteAllowed() && !articles!!.runPage(remaining(), contentIds)) {
+                            bodies?.bindPrepared(contentIds, held)
+                            if (client.contentWriteAllowed() && !articles!!.runPage(remaining(), contentIds, held)) {
                                 SyncV2Codec.fail("budget_paused")
                             }
                             true

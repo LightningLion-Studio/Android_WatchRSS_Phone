@@ -76,34 +76,34 @@ class SyncV2P5RecoveryTest {
         })
     }
     @Test
-    fun keepLocalRejectsMissingAndMismatchedNoteAttachments() = SyncV2P5Fixture().use { w ->
-        w.pending()
-        val markdown = "![fixture](assets/legacy.png)"
-        w.edit(markdown)
-        w.actions().use { actions ->
-            val before = w.publishCalls
-            code("closure_incomplete") { actions.choose(actions.preview(), "local") }
-            assertEquals(before, w.publishCalls)
-
-            val unreadable = File(w.root, "notes/assets/legacy.png").apply {
-                assertTrue(mkdirs())
+    fun keepLocalHoldsMissingAndMismatchedNoteAttachments() {
+        for (scenario in listOf("missing", "directory", "digest-mismatch")) SyncV2P5Fixture().use { w ->
+            w.pending()
+            val markdown = "![fixture](assets/legacy.png)"
+            w.edit(markdown)
+            val path = File(w.root, "notes/assets/legacy.png")
+            if (scenario == "directory") assertTrue(path.mkdirs())
+            if (scenario == "digest-mismatch") {
+                path.parentFile!!.mkdirs()
+                path.writeText("different bytes")
+                w.sql.execSQL(
+                    "INSERT INTO note_assets VALUES('asset','note',?,'legacy.png','image/png',4,'legacy.png',0,0,0,0)",
+                    arrayOf("a".repeat(64))
+                )
             }
-            code("closure_incomplete") { actions.choose(actions.preview(), "local") }
-            assertEquals(before, w.publishCalls)
-            assertTrue(unreadable.delete())
-            unreadable.apply {
-                parentFile!!.mkdirs()
-                writeText("different bytes")
-            }
-            w.sql.execSQL(
-                "INSERT INTO note_assets VALUES('asset','note',?,'legacy.png','image/png',4,'legacy.png',0,0,0,0)",
-                arrayOf("a".repeat(64))
-            )
             w.drain()
-            code("closure_incomplete") { actions.choose(actions.preview(), "local") }
-            assertEquals(before, w.publishCalls)
-            assertNotNull(actions.pendingChoice())
+            val entity = w.identity.entity("note", "note")
+            val remote = w.projection.cloudRows(setOf(entity)).single().getJSONObject("row")
+            w.actions().use { actions ->
+                val before = w.publishCalls
+                assertTrue(scenario, actions.choose(actions.preview(), "local").getBoolean("localCommitted"))
+                assertEquals(before + 1, w.publishCalls)
+                assertNull(actions.pendingChoice())
+            }
+            assertEquals(remote.toString(), w.projection.cloudRows(setOf(entity)).single().getJSONObject("row").toString())
+            assertTrue(entity in w.projection.heldOriginals())
             assertEquals(markdown, w.text())
+            if (scenario == "digest-mismatch") assertEquals("different bytes", path.readText())
         }
     }
     @Test
@@ -190,13 +190,17 @@ class SyncV2P5RecoveryTest {
         w.rollbackRemote()
         a.refresh()
         w.drain()
-        val before = w.publishCalls
-        code("closure_incomplete") { a.choose(a.pendingChoice()!!.preview, "local") }
-        assertEquals(before, w.publishCalls)
-        assertNotNull(a.pendingChoice())
+        assertTrue(a.choose(a.pendingChoice()!!.preview, "local").getBoolean("localCommitted"))
+        assertEquals(recipeOid, w.projection.cloudRows(setOf(row.getString("entityKey"))).single()
+            .getJSONObject("row").getString("recipeOid"))
+        assertEquals(setOf(row.getString("entityKey")), w.projection.heldOriginals())
+        w.sql.query("SELECT contentHash FROM phone_articles WHERE articleId='local-article'").use {
+            assertTrue(it.moveToFirst())
+            assertEquals("changed-hash", it.getString(0))
+        }
     }
     @Test
-    fun keepLocalRejectsAnArticleWithoutLocalBodyWhenCloudOnlyHasAPromise() = SyncV2P5Fixture().use { w ->
+    fun keepLocalCarriesCloudPromiseVerbatimAndHoldsArticleWithoutLocalBody() = SyncV2P5Fixture().use { w ->
         w.pending()
         addArticle(w)
         val actions = w.actions()
@@ -216,13 +220,15 @@ class SyncV2P5RecoveryTest {
         actions.refresh()
         w.drain()
         val before = w.publishCalls
-        code("closure_incomplete") { actions.choose(actions.pendingChoice()!!.preview, "local") }
-        assertEquals(before, w.publishCalls)
-        assertNotNull(actions.pendingChoice())
+        assertTrue(actions.choose(actions.pendingChoice()!!.preview, "local").getBoolean("localCommitted"))
+        assertEquals(before + 1, w.publishCalls)
+        assertNull(actions.pendingChoice())
+        assertEquals(row.toString(), w.projection.cloudRows(setOf(entity)).single().getJSONObject("row").toString())
+        assertEquals(setOf(entity), w.projection.heldOriginals())
         val warnings = ShadowLog.getLogsForTag(SyncV2ChoiceDiagnostics.TAG)
         assertTrue(warnings.any {
             it.type == android.util.Log.WARN && it.throwable == null &&
-                it.msg == "stage=prepareChoice.contentReady code=closure_incomplete kind=article " +
+                it.msg == "stage=preview.contentReady code=closure_incomplete kind=article " +
                 "reason=article_body_empty entityKeyPrefix=${entity.take(8)} count=1"
         })
     }

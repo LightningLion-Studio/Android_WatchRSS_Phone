@@ -216,7 +216,7 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
     fun prepareNoteAssetRegistration(id: String): NoteAssetRegistration {
         val selected = NoteAssetFiles.selection(db, id)
         val target = file("asset", id)
-        if (target.canonicalFile.parentFile != target.parentFile!!.canonicalFile) SyncV2Codec.fail("closure_incomplete")
+        if (!target.isFile || target.canonicalFile.parentFile != target.parentFile!!.canonicalFile) SyncV2Codec.fail("closure_incomplete")
         val observed = identity(target) ?: SyncV2Codec.fail("closure_incomplete")
         val raw = stableRead(target, observed, SyncV2BodyCodec.limit("asset")) ?: SyncV2Codec.fail("closure_incomplete")
         val sha = SyncV2BodyCodec.hash(raw)
@@ -265,9 +265,19 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
     }
 
     /** Discover referenced originals omitted by older private-UUID metadata. Absence never deletes. */
-    fun refreshReferences(now:Long,scope:String?=null,bluetoothScope:String?=null,checkOwner:()->Unit):List<String> {
+    fun refreshReferences(now:Long,scope:String?=null,bluetoothScope:String?=null,heldNotes:Set<String> = emptySet(),checkOwner:()->Unit):List<String> {
         SyncV2UnconfirmedWrite.recover(db)
         val errors=linkedSetOf<String>()
+        fun onlyHeldOwners(id: String): Boolean {
+            if (heldNotes.isEmpty()) return false
+            return db.controlQuery("SELECT DISTINCT noteId FROM note_asset_refs WHERE storageKey=?", arrayOf(id)).use { rows ->
+                if (!rows.moveToFirst()) return@use false
+                do {
+                    if (rows.getString(0) !in heldNotes) return@use false
+                } while (rows.moveToNext())
+                true
+            }
+        }
         for(id in references(db))try {
             checkOwner()
             if (SyncV2NoteAssetNames.exists(db, id) || pendingBluetooth("asset", id, bluetoothScope)) continue
@@ -286,7 +296,12 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
                 }
             }
             if (stage == null) write() else stage.verify(checkOwner,write)
-        }catch(e:Exception){checkOwner();errors.add(SyncV2BodyChannel.code(e))}
+        } catch (e: Exception) {
+            checkOwner()
+            val code = SyncV2BodyChannel.code(e)
+            if (code !in setOf("cloud_note_asset_missing", "closure_incomplete") || !onlyHeldOwners(id))
+                errors.add(code)
+        }
         return errors.toList()
     }
     fun validate(kind:String,id:String,value:JSONObject,raw:ByteArray) {
@@ -402,7 +417,7 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
         private fun bookUrl(url:String)=Regex("(?i)^https://watchrss\\.local/(?:import-txt-novel(?:/|$)|import-epub(?:/|$)|import-content/txt/)").containsMatchIn(url) ||
             Regex("(?i)watchrss://import/online-v1/[0-9a-f]{64}").matches(url) || Regex("watchrss://import/instance-v1/[a-f0-9]{32}(?:/|$)").find(url)?.range?.first==0
         /** Same literal link/image/HTML mapping as PodJS notes/cloud-assets.ts. */
-        private val reference=Regex("""<(?:img|a)\b[^>]*\b(?:src|href)\s*=\s*(?:"assets/([^"<>]+)"|'assets/([^'<>]+)'|assets/([^\s<>]+))[^>]*>|!?\[[^\]]*\]\(assets/([^)]*)\)""",RegexOption.IGNORE_CASE)
+        private val reference=Regex("""<(?:img|a)\b[^>]*\b(?:src|href)\s*=\s*(?:"assets/([^"<>]+)"|'assets/([^'<>]+)'|assets/([^\s<>]+))[^>]*>|!?\[[^\]]*\]\(assets/([^\s)]+)(?:\s+["'][^"']*["'])?\)""",RegexOption.IGNORE_CASE)
         fun assetKeys(markdown:String):Set<String> = reference.findAll(markdown).mapNotNull{m->
             val id=m.groupValues.drop(1).firstOrNull{it.isNotEmpty()}
             id?.takeIf{Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,254}").matches(it)}

@@ -258,7 +258,14 @@ class SyncV2P6ProductTest {
             fun full(h:Host){repeat(4){try{h.sync();return}catch(e:IllegalStateException){if(e.message!="budget_paused")throw e}};fail("scan did not finish")}
             Host(server,"old",bodyChannel=false).use{h->
                 h.note("![a](assets/old.png)")
-                SyncV2PhoneApply(h.room.openHelper.writableDatabase).upsert("note_assets",listOf("assetId"),JSONObject().put("assetId","private-old").put("storageKey","old.png").put("mimeType","image/png").put("displayName","old.png").put("createdAt",1).put("deleted",false).put("deletedAt",0))
+                File(h.context.filesDir,"notes/assets/old.png").also {
+                    it.parentFile!!.mkdirs()
+                    it.writeBytes(raw)
+                }
+                SyncV2PhoneApply(h.room.openHelper.writableDatabase).upsert("note_assets",listOf("assetId"),
+                    JSONObject().put("assetId","private-old").put("storageKey","old.png").put("mimeType","image/png")
+                        .put("displayName","old.png").put("createdAt",1).put("deleted",false).put("deletedAt",0)
+                        .put("sha256",SyncV2BodyCodec.hash(raw)).put("byteCount",raw.size))
                 full(h);assertEquals(1,server.publishes);assertEquals(0,server.bodyRequests)
             }
             Host(server,"receiver").use{h->

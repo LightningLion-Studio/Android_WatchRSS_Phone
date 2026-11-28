@@ -179,6 +179,45 @@ class SyncV2ForegroundRefreshTest {
         }
     }
 
+    @Test fun roundRestoresHeldNoteAndAssetWithoutRepublishingMissingOriginals() {
+        SyncV2P5Fixture().use { w ->
+            val storageKey = "local-only.png"
+            val noteId = "local-only-note"
+            val markdown = "![local](assets/$storageKey)"
+            val body = "restorable bytes".toByteArray()
+            val note = w.identity.entity("note", noteId)
+            val asset = w.identity.entity("asset", storageKey)
+            w.start()
+            val apply = SyncV2PhoneApply(w.sql)
+            apply.upsert("notes", listOf("noteId"), w.note(markdown=markdown).put("noteId",noteId))
+            apply.upsert("note_assets", listOf("assetId"), JSONObject().put("assetId","local-only")
+                .put("noteId",noteId).put("storageKey",storageKey).put("mimeType","image/png")
+                .put("sha256",SyncV2BodyCodec.hash(body)).put("byteCount",body.size))
+            w.drain()
+            withRuntime(w) { runtime ->
+                assertFalse(runtime.round())
+                assertEquals(setOf(note,asset), w.projection.heldOriginals())
+                assertTrue(w.projection.cloudRows(setOf(note,asset)).isEmpty())
+                assertEquals(1,w.publishCalls)
+            }
+
+            w.reopen()
+            withRuntime(w) { runtime ->
+                runtime.round()
+                runtime.round()
+                assertEquals(1,w.publishCalls)
+                val file = SyncV2BodyRepository(w.sql,w.root).file("asset",storageKey)
+                file.parentFile!!.mkdirs()
+                com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.writeBytes(file,body)
+                assertFalse(runtime.round())
+                assertEquals(2,w.publishCalls)
+                assertEquals(setOf(note,asset),w.projection.cloudRows(setOf(note,asset)).indexRows().keys)
+                assertTrue(w.projection.heldOriginals().isEmpty())
+                assertTrue(w.projection.state().body.isNull("pendingChoice"))
+            }
+        }
+    }
+
     private fun withRuntime(w:SyncV2P5Fixture, contentEnabled:Boolean=false, run:(SyncV2PhoneProduct.Runtime)->Unit) {
         SyncV2Lifetime { true }.use { life ->
             val user=w.identity.accountId
@@ -196,7 +235,7 @@ class SyncV2ForegroundRefreshTest {
             val client=life.own(w.f.client())
             val actions=life.own(SyncV2AccountActions(client,w.identity,w.projection,vault.signer,keys::read,
                 {it=="synthetic-phone"},w.root,true,{w.f.now}))
-            val cloud=SyncV2CloudSync(client,w.identity,w.projection,{it=="synthetic-phone"},keys::read,{w.f.now})
+            val cloud=SyncV2CloudSync(client,w.identity,w.projection,{it=="synthetic-phone"},keys::read,{w.f.now},w.root)
             val time=life.own(SyncV2TrustedTime {0}).also{it.acceptVerifiedCheckpoint(w.f.now)}
             val bodies=if(contentEnabled)SyncV2BodyChannel(w.projection,w.identity,keys,vault.signer,client,
                 SyncV2BodyRepository(w.sql,w.root),File(w.root,"bodies"),life,{it=="synthetic-phone"},{SyncV2TransportSignals()},{w.f.now})

@@ -82,7 +82,11 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
 
     fun refreshReferences(): List<String> {
         projection.migrateBodyAssetCandidates()
-        return repository.refreshReferences(now(), projection.scope, localBluetoothScope(), life::check)
+        val heldNotes = projection.accountLocalRows(projection.heldOriginals()).mapNotNull {
+            val meta = it.getJSONObject("meta")
+            meta.getString("logicalId").takeIf { meta.getString("kind") == "note" }
+        }.toSet()
+        return repository.refreshReferences(now(), projection.scope, localBluetoothScope(), heldNotes, life::check)
     }
     /** Random old placeholders with originals must be republished even without metadata edits. */
     fun pendingPublications():Set<String> {
@@ -102,11 +106,11 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
         return pending
     }
     /** Before account publication, bind actual original bytes without creating P3 recipes. */
-    fun bindPrepared(ids: Set<String>? = null) {
+    fun bindPrepared(ids: Set<String>? = null, excluded: Set<String> = emptySet()) {
         val scope = localBluetoothScope()
         for((kind,id)in candidates())try {
             val entity = identity.entity(kind, id)
-            if (ids != null && entity !in ids) continue
+            if (entity in excluded || ids != null && entity !in ids) continue
             if (repository.pendingBluetooth(kind, id, scope)) continue
             life.check();val c=projection.candidate(kind,id)?:continue;val v=SyncV2Business.join(kind,c.first,c.second);if(v.optBoolean("deleted"))continue
             val row=projection.wireContentRow(entity)?:continue;if(!row.isNull("recipeOid"))continue
@@ -128,7 +132,7 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
         if(globalRetry.isFile) {val r=SyncV2Wire.parse(globalRetry.readBytes(),4096,true)
             if(SyncV2Wire.uint(r,"until")>now())return Result(1,listOf(r.getString("code")))}
         val anchor=anchor(account);var pending=0;val errors=linkedSetOf<String>()
-        val heldBooks=projection.heldBooks(st)
+        val heldOriginals=projection.heldOriginals(st)
         var windowExpiry: Long? = null
         for (kind in listOf("asset", "book")) {
             var after = ""
@@ -137,7 +141,7 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
                 for(entry in page) {val m=entry.getJSONObject("meta");val row=entry.getJSONObject("row")
                     if(m.getString("kind") !in setOf("book","asset") || row.getBoolean("deleted") || !row.isNull("recipeOid") || row.isNull("bodyRevision"))continue
                     // A remote version cannot install an original over a different held Room row.
-                    if(row.getString("entityKey") in heldBooks)continue
+                    if(row.getString("entityKey") in heldOriginals)continue
                     val b=binding(entry);val dir=File(root,"${b.entityKey}/${b.bodyRevision}")
                     try {
                         val retry=File(dir,"retry.json");if(retry.isFile){val r=SyncV2Wire.parse(retry.readBytes(),4096,true);if(r.getLong("until")>now())throw SyncV2CloudError(r.getString("code"),true,r.getLong("until")-now())}

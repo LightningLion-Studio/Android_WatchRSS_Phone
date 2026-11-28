@@ -8,7 +8,7 @@ internal class SyncV2ArticlePublisher(private val projection:SyncV2Projection,pr
     private val keys:SyncV2ContentKeys,private val signer:SyncV2Signing,private val client:SyncV2CloudClient,
     private val store:SyncV2ContentStore,private val worker:SyncV2ContentWorker,private val files:File,
     private val check:()->Unit,private val monotonic:()->Long=android.os.SystemClock::elapsedRealtime) {
-    fun runPage(budgetMillis:Long=280000, ids:Set<String>?=null):Boolean {
+    fun runPage(budgetMillis:Long=280000, ids:Set<String>?=null, excluded:Set<String> = emptySet()):Boolean {
         val started=monotonic();val version=keys.newestVersion
         val exporter=SyncV2ContentExport(identity,keys.read(version),version,store)
         val revision=projection.state().revision
@@ -23,6 +23,10 @@ internal class SyncV2ArticlePublisher(private val projection:SyncV2Projection,pr
         var remaining=32L*1024*1024
         for((entity,id)in page.take(16)) {
             sourceCurrent();if(monotonic()-started>=budgetMillis || remaining<=0)return false
+            if (entity in excluded) {
+                store.save("p6/article-cursor",JSONObject().put("sourceRevision",revision).put("after",entity))
+                continue
+            }
             var row=projection.wireContentRow(entity)?:SyncV2Codec.fail("projection_incomplete")
             if(!row.getBoolean("deleted")) {
                 val source=SyncV2ArticleBody.source(projection.accountDatabase,files,id) {

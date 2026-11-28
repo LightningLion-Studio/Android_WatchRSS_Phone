@@ -171,6 +171,41 @@ class PhoneDeviceReauthenticationFlowTest {
         assertEquals("new-device",coordinator.deviceAccessToken)
         assertCustodyPreserved()
     }
+    @Test fun expiredCloudPaneReopensForRenewedSameAccountWithoutRecreation() {
+        runBlocking { repo.beginSameAccountReauthentication() }
+        restoration.setContent {
+            WatchRssPhoneTheme {
+                AccountScreen(
+                    accountRepository = repo,
+                    cloudSyncService = cloud,
+                    rssSources = emptyList(),
+                    usageTelemetry = telemetry,
+                    onBack = {},
+                    onLoginComplete = {},
+                    loginWithPasskey = { _, _ -> error("the test supplies the renewed session") },
+                    createPasskey = {},
+                    runAction = { action -> scope.launch { action() } },
+                    initialSection = AccountSection.CLOUD_SYNC,
+                    accessCoordinatorOverride = coordinator
+                )
+            }
+        }
+
+        val prompt = "登录已过期，请重新登录以继续云同步"
+        compose.onNodeWithText(prompt).assertIsDisplayed()
+        while (Shadows.shadowOf(context).nextStartedActivity != null) Unit
+        compose.onNodeWithText("重新登录").performClick()
+        val login = checkNotNull(Shadows.shadowOf(context).nextStartedActivity)
+        assertTrue(login.getBooleanExtra(AccountActivity.EXTRA_REAUTHENTICATE, false))
+
+        val renewed = checkNotNull(repo.session.value).copy(accessToken = "new-account", authenticationPaused = false)
+        runBlocking { repo.saveCompletedLogin(LoginProgress("login", 1, listOf("passkey"), true, renewed)) }
+        compose.onNodeWithText(prompt).assertDoesNotExist()
+        compose.onNodeWithText("重新登录").assertDoesNotExist()
+        assertTrue(repo.hasUsableSession)
+        assertCustodyPreserved()
+    }
+
     @Test fun validAccountDeviceVerificationOpensRealLoginFormAndReconcilesWithoutLosingKeys() {
         openDeviceLogin();signIn();assertReady()
         assertTrue(requests.any{it.endsWith("/phone-authorizations/claim")})

@@ -43,7 +43,7 @@ internal class PhoneCloudChangeScheduler(
                 .collect { (sequence, observedAt) ->
                     if (!bluetoothGate.awaitAutomaticSync(sequence)) return@collect
                     if (!fastEnabled()) {
-                        delay((observedAt + LEGACY_CHANGE_INTERVAL_MS - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0))
+                        delay((observedAt + FALLBACK_CHANGE_INTERVAL_MS - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0))
                         if (!bluetoothGate.awaitAutomaticSync(sequence)) return@collect
                     }
                     android.util.Log.i("WatchRSSCloud", "sync.origin=changeLogDebounce")
@@ -59,7 +59,7 @@ internal class PhoneCloudChangeScheduler(
     fun stop() { job?.cancel(); job = null }
 }
 
-private const val LEGACY_CHANGE_INTERVAL_MS = 10 * 60 * 1_000L
+private const val FALLBACK_CHANGE_INTERVAL_MS = 45_000L
 private const val FAST_CHANGE_INTERVAL_MS = 1_500L
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -71,7 +71,7 @@ internal fun debounceCloudChanges(
     .map { sequence -> sequence to elapsed() }
     .combine(fastMode.distinctUntilChanged()) { change, fast -> change to fast }
     .transformLatest { (change, fast) ->
-        val interval = if (fast) FAST_CHANGE_INTERVAL_MS else LEGACY_CHANGE_INTERVAL_MS
+        val interval = if (fast) FAST_CHANGE_INTERVAL_MS else FALLBACK_CHANGE_INTERVAL_MS
         delay((change.second + interval - elapsed()).coerceAtLeast(0))
         emit(change)
     }
@@ -109,7 +109,7 @@ internal fun debounceScheduledCloudChanges(
             if (change.sequence <= acknowledged.get()) return@transformLatest
             val seenAt = if (change.lastNonCursor > acknowledged.get()) nonCursorAt else cursorAt
             val interval = when {
-                !fast -> LEGACY_CHANGE_INTERVAL_MS
+                !fast -> FALLBACK_CHANGE_INTERVAL_MS
                 change.lastNonCursor > acknowledged.get() -> FAST_CHANGE_INTERVAL_MS
                 else -> CURSOR_CHANGE_INTERVAL_MS
             }

@@ -257,8 +257,9 @@ class SyncV2C7RereviewRegressionTest {
         val dir=java.io.File(w.sql.path).absoluteFile.parentFile!!
         val before=dir.listFiles()!!.filter{it.name.startsWith("syncv2-note-reserve-")}.toSet()
         SyncV2NoteWiring.seal(w.identity,w.f.signer,w.key,1,w.sql,w.projection.scope,entity,pair.second,true,null,null,emptyList(),null,true)!!.use{sealed->
-            val file=(dir.listFiles()!!.filter{it.name.startsWith("syncv2-note-reserve-")}.toSet()-before).single()
-            val actual=file.length()
+            val created=dir.listFiles()!!.filter{it.name.startsWith("syncv2-note-reserve-")}.toSet()-before
+            assertTrue("budget reservation must not write zero-filled temp files",created.isEmpty())
+            val actual=sealed.reservation.reservedBytes
             val expected=SyncV2NoteBudget.required(maxOf(old,measure.shortPlainBytes),sealed.upperBound,asset.length())
             val owned=w.sql.query("SELECT COUNT(*) FROM note_assets WHERE noteId=?",arrayOf(forkId)).use{it.moveToFirst();it.getInt(0)}
             println("RR_FORK_ATTACHMENT_BUDGET actual=$actual expected=$expected attachmentBytes=${asset.length()} forkOwnedAssetRows=$owned")

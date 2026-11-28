@@ -188,7 +188,11 @@ class SyncV2C7ReviewTest {
         val directory=java.nio.file.Files.createTempDirectory("c7-budget").toFile()
         try {
             assertEquals("storage_pressure",code{SyncV2NoteBudget.reserve(directory,1024,1023)})
-            SyncV2NoteBudget.reserve(directory,1024,1024).use{assertEquals(1024L,directory.listFiles()!!.single().length())}
+            assertEquals("storage_pressure",code{SyncV2NoteBudget.reserve(java.io.File(directory,"missing"),1024,4096)})
+            SyncV2NoteBudget.reserve(directory,1024,1024).use{reservation->
+                assertEquals(1024L,reservation.reservedBytes)
+                assertTrue(directory.listFiles()!!.isEmpty())
+            }
             assertTrue(directory.listFiles()!!.isEmpty())
         }finally{directory.deleteRecursively()}
     }

@@ -1,10 +1,10 @@
 package com.lightningstudio.watchrss.phone.syncv2
 
+import android.os.StatFs
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload
 import org.json.JSONObject
 import java.io.File
-import java.io.FileOutputStream
 
 /** 25.6: charge old/new business graphs, journals, sealed closure and attachments together.
  * No reuse discount is claimed here: unconfirmed OIDs pay the worst-case staging charge. */
@@ -16,15 +16,15 @@ internal object SyncV2NoteBudget {
         repeat(2){total=add(total,closureUpperBound);total=add(total,attachmentBytes)}
         return total
     }
-    class Reservation internal constructor(private val file:File):AutoCloseable {override fun close(){file.delete()}}
-    fun reserve(directory:File,bytes:Long,available:Long=directory.usableSpace):Reservation {
-        if(bytes<0||available<bytes)SyncV2Codec.fail("storage_pressure")
-        val file=try{File.createTempFile("syncv2-note-reserve-",".tmp",directory)}catch(e:java.io.IOException){SyncV2Codec.fail("storage_pressure")}
-        try {
-            FileOutputStream(file).use{out->val block=ByteArray(8192);var remaining=bytes
-                while(remaining>0){val n=minOf(remaining,block.size.toLong()).toInt();out.write(block,0,n);remaining-=n};out.fd.sync()}
-            return Reservation(file)
-        }catch(e:java.io.IOException){file.delete();SyncV2Codec.fail("storage_pressure")}
+    private fun availableSpace(directory:File):Long {
+        if(!directory.exists())return 0L
+        val statFsAvailable=runCatching{StatFs(directory.path).availableBytes}.getOrDefault(0L)
+        return if(statFsAvailable>0L)statFsAvailable else directory.usableSpace
+    }
+    class Reservation internal constructor(val reservedBytes:Long):AutoCloseable {override fun close()=Unit}
+    fun reserve(directory:File,bytes:Long,available:Long=availableSpace(directory)):Reservation {
+        if(bytes<0||!directory.isDirectory||available<bytes)SyncV2Codec.fail("storage_pressure")
+        return Reservation(bytes)
     }
     fun reserve(db:SupportSQLiteDatabase,scope:String,entity:String,ordinaryBytes:Long,closureUpperBound:Long,payload:JSONObject):Reservation {
         val id=db.query("SELECT logical_id FROM syncv2_identity_map WHERE entity_key=? LIMIT 1",arrayOf(entity)).use{if(it.moveToFirst())it.getString(0)else null}

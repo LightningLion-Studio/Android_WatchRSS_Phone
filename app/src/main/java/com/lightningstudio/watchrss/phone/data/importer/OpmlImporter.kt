@@ -77,6 +77,6 @@ class OpmlImporter {
 
     private companion object {
         const val MAX_FILE_BYTES = 2 * 1024 * 1024
-        const val MAX_SUBSCRIPTIONS = 500
+        const val MAX_SUBSCRIPTIONS = 2000
     }
 }

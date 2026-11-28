@@ -265,10 +265,36 @@ class PhoneCloudHeadPollerTest {
         mode.value = false
         runCurrent()
         edits.emit(3)
-        advanceTimeBy(599_999)
+        advanceTimeBy(44_999)
         assertEquals(1, published.size)
         advanceTimeBy(1)
         runCurrent()
-        assertEquals(listOf(2L to 2_500L, 3L to 602_500L), published)
+        assertEquals(listOf(2L to 2_500L, 3L to 47_500L), published)
+    }
+
+    @Test fun scheduledFallbackDebounceUsesFortyFiveSecondsWhenHeadPollUnavailable() = runTest {
+        val edits = MutableStateFlow(com.lightningstudio.watchrss.phone.data.db.CloudSchedulingSequence(1, 1))
+        val mode = MutableStateFlow(false)
+        val sent = mutableListOf<Pair<Long, Long>>()
+        backgroundScope.launch {
+            debounceScheduledCloudChanges(edits, mode) { testScheduler.currentTime }.collect {
+                sent += it.first to testScheduler.currentTime
+            }
+        }
+        runCurrent()
+
+        edits.value = com.lightningstudio.watchrss.phone.data.db.CloudSchedulingSequence(2, 2)
+        advanceTimeBy(44_999)
+        assertTrue(sent.isEmpty())
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(listOf(2L to 45_000L), sent)
+
+        edits.value = com.lightningstudio.watchrss.phone.data.db.CloudSchedulingSequence(3, 2)
+        advanceTimeBy(44_999)
+        assertEquals(1, sent.size)
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(listOf(2L to 45_000L, 3L to 90_000L), sent)
     }
 }

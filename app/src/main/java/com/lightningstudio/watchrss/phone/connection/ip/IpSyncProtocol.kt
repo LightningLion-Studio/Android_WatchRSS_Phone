@@ -237,9 +237,6 @@ internal object IpSyncProtocol {
     const val TYPE_HELLO_ACK = "helloAck"
     const val TYPE_ERROR = "error"
     const val SERVICE_TYPE = "_watchrss-sync._tcp."
-    const val CONNECT_TIMEOUT_MS = 2_000L
-    const val HANDSHAKE_TIMEOUT_MS = 2_000L
-    const val FAILED_ENDPOINT_COOLDOWN_MS = 10_000L
     const val CHALLENGE_TTL_MS = 30_000L
     val BLE_DISCOVERY_SERVICE_UUID: UUID =
         UUID.fromString("7e57d001-1f7d-4f0b-9f3d-2d7d3a65d001")

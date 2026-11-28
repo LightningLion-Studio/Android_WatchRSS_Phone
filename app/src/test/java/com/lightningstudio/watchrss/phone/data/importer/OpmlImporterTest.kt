@@ -44,4 +44,31 @@ class OpmlImporterTest {
             )
         }
     }
+
+    @Test fun `allows up to 2000 subscriptions and rejects above limit`() {
+        fun buildOpml(count: Int): ByteArray = buildString {
+            append("<opml version=\"2.0\"><body>")
+            for (index in 1..count) {
+                append("<outline text=\"F").append(index)
+                    .append("\" xmlUrl=\"https://e.co/").append(index).append("\"/>")
+            }
+            append("</body></opml>")
+        }.toByteArray()
+
+        val maxAllowed = OpmlImporter().parse(buildOpml(2000))
+        assertEquals(2000, maxAllowed.size)
+
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            OpmlImporter().parse(buildOpml(2001))
+        }
+        assertEquals("OPML 最多支持 2000 个订阅源", error.message)
+    }
+
+    @Test fun `keeps 2 MiB file size limit`() {
+        val oversized = ByteArray(2 * 1024 * 1024 + 1) { ' '.code.toByte() }
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            OpmlImporter().parse(oversized)
+        }
+        assertEquals("OPML 文件过大", error.message)
+    }
 }

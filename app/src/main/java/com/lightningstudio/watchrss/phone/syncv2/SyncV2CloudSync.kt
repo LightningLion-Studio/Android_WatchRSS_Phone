@@ -24,22 +24,40 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         if(expires>current+300000) {client.checkpoint(current);current=now()}
         if(expires<=current || expires>current+300000)SyncV2Codec.fail("window_expired")
     }
-    private fun keys(window:String):JSONObject {
+    private data class SigningKeys(val response:JSONObject,val fingerprint:String)
+    private fun keys(window:String):SigningKeys {
         val response=client.signingKeys(window);val revision=SyncV2Wire.string(response,"revocationRevision");SyncV2Codec.d64(revision)
         val bindings=response.getJSONArray("bindings");if(bindings.length()>64)SyncV2Codec.fail("invalid_schema")
-        for(i in 0 until bindings.length())authors.accept(bindings.getJSONObject(i),revision)
-        projection.saveSigningBindings(bindings,revision)
-        return response
+        val current=sortedMapOf<String,JSONObject>()
+        for(i in 0 until bindings.length()) {
+            val binding=bindings.getJSONObject(i)
+            authors.accept(binding,revision)
+            val body=binding.getJSONObject("body")
+            // Mapping signatures may be freshly generated for each response.
+            val mapping=binding.optJSONObject("deviceMapping")?.getJSONObject("body")
+            if(current.put(body.getString("deviceId"),JSONObject().put("binding",body).put("mapping",mapping))!=null)
+                SyncV2Codec.fail("invalid_schema")
+        }
+        val fingerprint=SyncV2Codec.hash(JSONObject().put("revision",revision).put("bindings",JSONArray(current.values.toList())))
+        projection.saveSigningBindings(bindings,revision,fingerprint)
+        return SigningKeys(response,fingerprint)
     }
-    fun readCurrent():String {
+
+    internal data class ReadResult(val status:String,val reused:Boolean,val serverRevision:String)
+
+    fun readCurrent():String = readCurrentResult().status
+
+    internal fun readCurrentResult():ReadResult {
         capabilities() // Every error, including busy, ends this round. No catch-and-continue.
         // Use the authenticated checkpoint's own fixed window. A later negotiate may legitimately race it.
         val window=client.checkpoint(now()).getJSONObject("body");fresh(window);val id=window.getString("windowId")
-        keys(id)
+        val signing=keys(id)
+        val serverRevision=window.getString("serverRevision")
+        val noteSegmentsRead=client.noteSegmentsRead()
         val account=window.getJSONObject("account")
         if(account.isNull("commitOid")) {
             if(projection.state().body.optJSONObject("account")!=null)SyncV2Codec.fail("replay_detected")
-            return "empty-account"
+            return ReadResult("empty-account",false,serverRevision)
         }
         val observation=JSONObject().put("oid",account.getString("commitOid")).put("revision",account.getString("revision")).put("generation",account.getString("rollbackGeneration"))
         val known=projection.state().body
@@ -49,7 +67,11 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
             val accepted=known.optJSONArray("knownAccountParents")?:JSONArray()
             if(observation.getString("oid")!=prior.getString("oid") && ((0 until accepted.length()).any{accepted.getJSONObject(it).getString("oid")==observation.getString("oid")} || projection.accountKnownHistoricalOid(observation.getString("oid"))))SyncV2Codec.fail("replay_detected")
         }
-        if(projection.reuseCloudIndex(observation,window.getString("serverRevision")))return if(projection.status()=="awaiting-user")"awaiting-user" else "metadata-ready"
+        fun result(reused:Boolean)=ReadResult(
+            if(projection.status()=="awaiting-user")"awaiting-user" else "metadata-ready",reused,serverRevision
+        )
+        fresh(window)
+        if(projection.reuseCloudIndex(observation,serverRevision,signing.fingerprint,noteSegmentsRead))return result(true)
         val head=account.getString("commitOid");val pin=projection.state().body.optJSONObject("account")?.getString("oid")
         val headers=mutableListOf<JSONObject>();var at:String?=head;val visited=mutableSetOf<String>()
         // Even when head==pin, fetch the current header to authenticate the full control closure.
@@ -70,7 +92,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
             val next=if(page.isNull("nextOid"))null else page.getString("nextOid")
             if(next!=at || page.get("complete")!=(at==pin))SyncV2Codec.fail("ref_continuity_unavailable")
         }
-        val closure=SyncV2ControlClosure(identity,authors,contentKey,client.noteSegmentsRead())
+        val closure=SyncV2ControlClosure(identity,authors,contentKey,noteSegmentsRead)
         val verified=projection.verifyCloud(closure,headers.first(),{oid->client.raw(oid,id)},{ parent ->
             client.reference(parent,id).let { JSONObject(it.toString()).apply { remove("version") } }
         },SyncV2ControlFetch.Remote({oids->client.batch(id,oids)}){parents->
@@ -78,7 +100,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         })
         verified.use {
         fresh(window)
-        projection.installCloudIndex(observation,headers,verified,authors::header,window.getString("serverRevision")) { oid ->
+        projection.installCloudIndex(observation,headers,verified,authors::header,serverRevision,readHeader={ oid ->
             // Permanent signed headers remain available after historical content has expired.
             val page=client.ancestry(oid,null);val values=page.getJSONArray("headers")
             if(page.getString("head")!=oid || !page.isNull("stop") || values.length() !in 1..64)SyncV2Codec.fail("ref_continuity_unavailable")
@@ -86,9 +108,9 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
             val envelope=JSONObject().put("body",first.getJSONObject("body")).put("signature",first.getString("signature"))
             if(first.getString("commitOid")!=oid || SyncV2Codec.oid("commit-header",envelope)!=first.getString("headerOid"))SyncV2Codec.fail("hash_mismatch")
             fresh(window);envelope
+        },signingFingerprint=signing.fingerprint,noteSegmentsRead=noteSegmentsRead)
         }
-        }
-        return if(projection.status()=="awaiting-user")"awaiting-user" else "metadata-ready"
+        return result(false)
     }
     fun resumePublish():JSONObject? {
         val request=projection.pendingPublish()?:return null
@@ -111,10 +133,10 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         val cursor=before.optString("eventCursor","0")
         val events=try{client.events(cursor)}catch(e:SyncV2CloudError){
             if(e.code!="history_expired")throw e
-            val status=readCurrent()
-            val rebound=projection.state().body.optString("metadataServerRevision",cursor)
+            val read=readCurrentResult()
+            val rebound=if(read.status=="empty-account")cursor else read.serverRevision
             projection.saveEventCursor(rebound)
-            return JSONObject().put("status",status).put("historyExpired",true).put("cursor",rebound)
+            return JSONObject().put("status",read.status).put("historyExpired",true).put("cursor",rebound)
         };fresh(events)
         val current=before.optJSONObject("account");val cloud=events.getJSONObject("account")
         // Account generation survives event retention. Always authenticate the current head before cursor advance.
@@ -133,7 +155,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         if(caps.getJSONObject("flags").get("indexWrite")!=true)throw SyncV2CloudError("feature_disabled",true,1000)
         if(signer.deviceId!=client.deviceId)SyncV2Codec.fail("authentication_required")
         var window=client.negotiate();fresh(window)
-        val registrations=keys(window.getString("windowId"))
+        val registrations=keys(window.getString("windowId")).response
         val bindings=registrations.getJSONArray("bindings")
         if((0 until bindings.length()).none{bindings.getJSONObject(it).getJSONObject("body").getString("deviceId")==signer.deviceId}) {
             client.registerSigningKey(projection.prepareOwnSigningBinding(signer,now(),registrations.getString("revocationRevision")))

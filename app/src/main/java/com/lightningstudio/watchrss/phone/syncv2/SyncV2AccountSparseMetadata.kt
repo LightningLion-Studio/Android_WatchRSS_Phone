@@ -74,6 +74,7 @@ internal class SyncV2AccountSparseMetadata(private val projection:SyncV2Projecti
             db.execSQL("DELETE FROM syncv2_cloud_objects WHERE scope=? AND oid=?",arrayOf(scope,oid))
             db.execSQL("DELETE FROM syncv2_p5_ref_index WHERE scope=? AND (parent_oid=? OR refs_oid=?)",arrayOf(scope,oid,oid))
         }
+        st.body.remove("metadataSigningFingerprint")
         st.body.put("metadataTreeRoot",root).put("metadataAccount",account).put("metadataStatus","metadata-ready")
             .put("metadataSchema",SyncV2HeadPins.schema).put("metadataRows",st.body.getInt("metadataRows")+rowDelta).put("metadataServerRevision",serverRevision)
     }

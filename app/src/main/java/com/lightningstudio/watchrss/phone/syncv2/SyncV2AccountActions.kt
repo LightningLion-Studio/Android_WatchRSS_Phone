@@ -111,14 +111,26 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         beforeApply: (String) -> Unit = {}
     ): JSONObject {
         gate()
+        require(maxPages in 1..4096 && budgetMillis in 1..290_000)
         syncFiles()
-        val status = cloud.readCurrent()
-        beforeApply(status)
-        trustedNow()?.let { projection.accountContact(it) }
-        val progress = projection.runWindow(maxPages, budgetMillis)
+        val read=cloud.readCurrentResult()
+        beforeApply(read.status)
+        val before=projection.state()
+        val unchanged=read.reused && projection.isUnchangedAccount(before)
+        trustedNow()?.let { projection.accountContact(it,unchanged=unchanged) }
+        // Contact can require a rebuild after the history window expires. Recheck
+        // the business/file witnesses after the network calls and before returning.
+        syncFiles()
+        val current=projection.state()
+        if(unchanged && projection.isUnchangedAccount(current)) {
+            recovery.purge(trustedNow())
+            return stateSummary(projection.state()).put("status",read.status).put("unchanged",true).put("projectionPaused",false)
+        }
+        val paused=if(!current.body.optBoolean("projectionRebuildRequired") && projection.isWindowComplete(current))false
+            else projection.runWindow(maxPages,budgetMillis).paused
         recovery.purge(trustedNow())
-        if(!progress.paused)applyObserved()
-        return state().put("status",status).put("projectionPaused",progress.paused)
+        if(!paused)applyObserved()
+        return state().put("status",read.status).put("unchanged",false).put("projectionPaused",paused)
     }
     fun poll():JSONObject {
         gate();syncFiles();val result=cloud.poll()
@@ -153,10 +165,13 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         runCatching{flushAppliedAck()};return true
     }
     fun state():JSONObject {
-        syncFiles();val st=projection.state();return JSONObject().put("account",st.body.optJSONObject("account")?:JSONObject.NULL)
+        syncFiles()
+        return stateSummary(projection.state())
+    }
+    private fun stateSummary(st:SyncV2Projection.State):JSONObject =
+        JSONObject().put("account",st.body.optJSONObject("account")?:JSONObject.NULL)
             .put("lastSeen",st.body.optString("lastSeen","0")).put("stateVersion",st.version).put("localChangeRevision",st.revision)
             .put("pendingChoice",st.body.optJSONObject("pendingChoice")?:JSONObject.NULL).put("actionPending",!st.body.isNull("pendingAccountAction")).put("lastAction",st.body.optJSONObject("accountActionReceipt")?:JSONObject.NULL)
-    }
     /** F1/W3 status surface for the (later) UI: openable or note_unopenable with reason. */
     fun noteStatus(logicalId:String):JSONObject {
         val entity=identity.entity("note",logicalId)
@@ -391,6 +406,10 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         }finally{prunePreviewSpools();transientRows.forEach{it.close()};transientRows.clear()}
     }
     private fun syncFiles(){projection.accountFilesObserved(fileCapture())}
+    internal fun foregroundVersion():String {
+        syncFiles()
+        return projection.state().version
+    }
     private fun fileCapture():JSONObject {
         val token=com.lightningstudio.watchrss.phone.data.local.CloudExportFileWitness.captureForProjection(files)
         return JSONObject().put("notes",token.notes).put("privateFiles",token.privateFiles)

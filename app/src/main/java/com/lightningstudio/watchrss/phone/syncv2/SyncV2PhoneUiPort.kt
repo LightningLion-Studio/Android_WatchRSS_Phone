@@ -20,6 +20,10 @@ internal class SyncV2PhoneUiPort(private val product:SyncV2PhoneProduct,private 
         val code=syncV2ErrorCode(error)?:"temporarily_unavailable"
         _state.value=_state.value.copy(phase=if(code in setOf("storage_pressure","trusted_time_unavailable","signing_state_unavailable"))"blocked"else"error",errorCode=code)
     }
+    internal fun refreshUnchanged() {
+        runtime.life.check()
+        _state.value=_state.value.copy(phase="idle",lastSyncedAtMillis=runtime.lastSyncedAt,errorCode=null)
+    }
     internal fun refresh() {
         runtime.life.check();val gates=gates();val own=runtime.signingDeviceId()
         val projection=runtime.projection;val body=projection.state().body

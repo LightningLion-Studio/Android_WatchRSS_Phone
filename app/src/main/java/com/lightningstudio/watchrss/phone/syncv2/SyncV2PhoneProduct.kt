@@ -210,8 +210,11 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             return Result(true)
         }
         return try {
-            live.round(manual, restoreCurrent)
-            _uiPort.value?.refresh()
+            val unchanged=live.round(manual, restoreCurrent)
+            if(unchanged)_uiPort.value?.refreshUnchanged() else _uiPort.value?.refresh()
+            val pendingBodies=live.bodyResult.pending>0 || live.bodyResult.errors.isNotEmpty() ||
+                (!unchanged && live.hasMissingImportedArticleBody(FileArticleContentStore(context)))
+            if(pendingBodies)live.invalidateBodyWatermark()
             val state = live.projection.state().body
             Result(
                 enabled = true,
@@ -219,13 +222,13 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
                 pendingAction = !state.isNull("pendingAccountAction") ||
                     !state.isNull("pendingAppliedAck") ||
                     (restoreCurrent && !state.isNull("pendingPublish")),
-                pendingBodies = live.bodyResult.pending > 0 || live.bodyResult.errors.isNotEmpty() ||
-                    live.hasMissingImportedArticleBody(FileArticleContentStore(context)),
+                pendingBodies = pendingBodies,
                 quotaBlocked = "quota_exceeded" in live.bodyResult.errors,
                 appliedHead = !state.isNull("account") && state.optJSONObject("appliedAccount")?.optString("oid") ==
                     state.getJSONObject("account").getString("oid") && state.isNull("pendingAppliedAck")
             )
         } catch(e:Throwable) {
+            live.invalidateBodyWatermark()
             if (e !is CancellationException) _uiPort.value?.failed(e)
             throw e
         }
@@ -368,6 +371,11 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
         val client:SyncV2CloudClient,val articles:SyncV2ArticlePublisher?,val bodies:SyncV2BodyChannel?,val time:SyncV2TrustedTime,val contentEnabled:Boolean,val serviceAnnouncement:String) {
         var lastSyncedAt:Long?=null
         var bodyResult=SyncV2BodyChannel.Result(0,emptyList())
+        // A restart or an interrupted/partial round must recheck body availability.
+        private data class BodyWatermark(val stateVersion:String,val keyVersion:Long)
+        private var bodyWatermark:BodyWatermark?=null
+        fun invalidateBodyWatermark() { bodyWatermark=null }
+
         fun signingDeviceId():String? {
             life.check();val signer=vault.signerOrNull()?:return null
             val bindings=projection.state().body.optJSONArray("signingBindings")?:return null
@@ -401,7 +409,7 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             }
         }
 
-        fun round(manual:Boolean=false,restoreCurrent:Boolean=false) {
+        fun round(manual:Boolean=false,restoreCurrent:Boolean=false):Boolean {
             life.check()
             val started=android.os.SystemClock.elapsedRealtime()
             fun remainingMillis() = 290_000L - (android.os.SystemClock.elapsedRealtime() - started)
@@ -409,9 +417,11 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
                 if (it <= 0) throw SyncV2CloudError("sync_timeout")
             }
             try {
-                roundWithinBudget(manual, restoreCurrent, ::remaining)
+                val unchanged=roundWithinBudget(manual, restoreCurrent, ::remaining)
                 remaining()
+                return unchanged
             } catch (error: Exception) {
+                invalidateBodyWatermark()
                 if (error !is CancellationException && remainingMillis() <= 0 &&
                     (error.message == "budget_paused" || error is InterruptedIOException)) {
                     throw SyncV2CloudError("sync_timeout")
@@ -420,8 +430,10 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             }
         }
 
-        private fun roundWithinBudget(manual: Boolean, restoreCurrent: Boolean, remaining: () -> Long) {
+        private fun roundWithinBudget(manual: Boolean, restoreCurrent: Boolean, remaining: () -> Long):Boolean =
             client.withinBudget(remaining()) {
+            val priorBodies=bodyWatermark
+            invalidateBodyWatermark()
             if(vault.signerOrNull()==null) {
                 actions.refresh(budgetMillis=remaining())
                 SyncV2Codec.fail("signing_state_unavailable")
@@ -430,24 +442,35 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             if (!restoreCurrent) cloud.resumePublish()
             // Refresh verifies the current head and applies it. A second read before refresh
             // repeats the checkpoint and signing-key requests on every foreground catch-up.
-            actions.refresh(budgetMillis = remaining()) { status ->
+            val refresh=actions.refresh(budgetMillis = remaining()) { status ->
                 if (restoreCurrent && status == "empty-account") {
                     throw SyncV2CloudError("current_library_missing")
                 }
                 if (signingDeviceId() == null) actions.prepareSigning()
             }
+            if(!restoreCurrent && refresh.getBoolean("unchanged") &&
+                priorBodies==BodyWatermark(actions.foregroundVersion(),keys.newestVersion) &&
+                priorBodies?.stateVersion==refresh.getString("stateVersion")) {
+                lastSyncedAt=time.now()
+                bodyWatermark=priorBodies
+                return@withinBudget true
+            }
+
+            // Capture before body discovery so a concurrent business or file write
+            // cannot be stamped as checked by this round.
+            val bodyStart=BodyWatermark(actions.foregroundVersion(),keys.newestVersion)
             val referenceErrors=if(contentEnabled)life.guard{bodies?.refreshReferences()?:emptyList()}else emptyList()
-            val progress=projection.runWindow(budgetMillis=remaining())
-            if(progress.paused)SyncV2Codec.fail("budget_paused")
+            if((refresh.getBoolean("projectionPaused") || !projection.isWindowComplete()) &&
+                projection.runWindow(budgetMillis=remaining()).paused)SyncV2Codec.fail("budget_paused")
             val resetAdditions = !restoreCurrent && projection.prepareResetPublication()
             if (resetAdditions && !projection.isWindowComplete() &&
                 projection.runWindow(budgetMillis = remaining()).paused) SyncV2Codec.fail("budget_paused")
             var st=projection.state()
             if(!st.body.isNull("pendingAccountAction")){
-                if (restoreCurrent) return@withinBudget
+                if (restoreCurrent) return@withinBudget false
                 actions.resume();st=projection.state()
             }
-            if (!st.body.isNull("pendingChoice") || (restoreCurrent && !st.body.isNull("pendingPublish"))) return@withinBudget
+            if (!st.body.isNull("pendingChoice") || (restoreCurrent && !st.body.isNull("pendingPublish"))) return@withinBudget false
             val unacknowledged = st.revision != st.body.optString("acknowledgedLocalRevision", "0")
             if (restoreCurrent) {
                 if (unacknowledged || st.body.optBoolean("unknownEditBase")) {
@@ -459,7 +482,7 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
                         (referenceErrors + result.errors).distinct())
                     if (projection.state().body.isNull("pendingAppliedAck")) lastSyncedAt = time.now()
                 }
-                return@withinBudget
+                return@withinBudget false
             }
             val localDirty=unacknowledged || st.body.isNull("activeGeneration")
             val dirty=localDirty || (contentEnabled && bodies?.needsPublication()==true)
@@ -467,7 +490,7 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
                 val publicationRevision=st.revision
                 val accountHead=st.body.optJSONObject("account")
                 if(!resetAdditions && localDirty && accountHead!=null && (st.body.optBoolean("unknownEditBase") || st.body.optJSONObject("editBase")?.optString("accountOid")!=accountHead.getString("oid"))) {
-                    projection.requestConcurrentChoice();return@withinBudget
+                    projection.requestConcurrentChoice();return@withinBudget false
                 }
                 actions.prepareSigning()
                 projection.prepareWireIndex(vault.signer,keys.read(keys.newestVersion),keys.newestVersion,resetAdditions).close()
@@ -482,7 +505,9 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             }
             st=projection.state()
             if(!st.body.isNull("appliedAccount") && st.body.isNull("pendingAppliedAck"))lastSyncedAt=time.now()
+            if(bodyResult.pending==0 && bodyResult.errors.isEmpty() && projection.isUnchangedAccount(st) &&
+                bodyStart==BodyWatermark(actions.foregroundVersion(),keys.newestVersion))bodyWatermark=bodyStart
+            false
             }
-        }
     }
 }

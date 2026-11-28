@@ -35,6 +35,10 @@ internal class SyncV2P5Fixture(private val lifetime:SyncV2Lifetime?=null,
     /** C7 hook: rewrites one entity's state wire before it is sealed (e.g. declares a feature to isolate it). */
     var stateHook:((String,JSONObject)->Unit)?=null
     var noteSegmentsAnnounced=false
+    private val signingRegisteredAt=f.now
+    var revocationRevision="0"
+    var signingBindings: (() -> JSONArray)?=null
+    var beforeSigningKeys: (() -> Unit)?=null
     init {
         val targetRow=note("old title","base\nline\n")
         target=commit(listOf(targetRow),null,"0","normal",null)
@@ -50,7 +54,11 @@ internal class SyncV2P5Fixture(private val lifetime:SyncV2Lifetime?=null,
                     .put("flags",JSONObject().put("read",true).put("indexWrite",indexWrite).put("contentWrite",true).put("historyRestore",flags)))
                 route=="negotiate" || route=="account"->f.response(window())
                 route=="checkpoint"->f.response(f.signer.signed("wrss.sync.v2/checkpoint-sign",window().apply{remove("version")}.put("checkpointId","33".repeat(16)).put("issuedAtMillis",f.now).put("historyFloorMillis",0)).put("version",2).put("scope",identity.scope))
-                route=="devices/signing-keys"->f.response(f.dto().put("bindings",JSONArray().put(binding())).put("revocationRevision","0"))
+                route=="devices/signing-keys"->{
+                    beforeSigningKeys?.invoke()
+                    f.response(f.dto().put("bindings",signingBindings?.invoke()?:JSONArray().put(binding()))
+                        .put("revocationRevision",revocationRevision))
+                }
                 route=="account/ancestry"->{
                     var at=request.requestUrl!!.queryParameter("head");val stop=request.requestUrl!!.queryParameter("stop");val entries=JSONArray();var n=0
                     while(at!=stop && at!=null && n++<64) {
@@ -101,7 +109,7 @@ internal class SyncV2P5Fixture(private val lifetime:SyncV2Lifetime?=null,
     }
     fun binding():JSONObject {
         val mapping=JSONObject().put("scope",identity.scope).put("deviceId",f.signer.deviceId).put("keyId",f.signer.keyId).put("legacyDeviceId","synthetic-phone").put("approvalRevision","1")
-        return identity.signingBinding(f.signer,f.now,"0").put("deviceMapping",f.signer.signed("wrss.sync.v2/device-mapping",mapping))
+        return identity.signingBinding(f.signer,signingRegisteredAt,"0").put("deviceMapping",f.signer.signed("wrss.sync.v2/device-mapping",mapping))
     }
     fun window()=f.dto().put("windowId","12".repeat(16)).put("expiresAtMillis",f.now+300000).put("issuedAtMillis",f.now).put("serverRevision",current.getString("revision")).put("historyFloorRevision","0")
         .put("refs",JSONArray().also{if(deviceOid!=null)it.put(JSONObject().put("deviceId",f.signer.deviceId).put("commitOid",deviceOid).put("refRevision",deviceRevision))}).put("account",JSONObject(current.toString()))

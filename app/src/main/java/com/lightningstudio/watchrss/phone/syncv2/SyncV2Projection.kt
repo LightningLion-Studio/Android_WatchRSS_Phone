@@ -331,7 +331,8 @@ internal class SyncV2Projection(
     }
     /** P2 owns only current authenticated control content; never sends business applied ACK. */
     fun installCloudIndex(window:JSONObject,headers:List<JSONObject>,verified:SyncV2ControlClosure.Verified,
-        verifyHeader:(JSONObject)->JSONObject,serverRevision:String?=null,readHeader:((String)->JSONObject)?=null) {
+        verifyHeader:(JSONObject)->JSONObject,serverRevision:String?=null,readHeader:((String)->JSONObject)?=null,
+        signingFingerprint:String?=null,noteSegmentsRead:Boolean=false) {
         requireWorkerContext();val observed=validAccount(window);val before=state()
         if(verified.commitOid!=observed.getString("oid"))SyncV2Codec.fail("hash_mismatch")
         val proof=authenticateHeads(observed,headers,before,verifyHeader,readHeader)
@@ -352,24 +353,42 @@ internal class SyncV2Projection(
                 JSONObject().put("accountOid", observed.getString("oid")).put("stable", JSONArray(stable.sorted())))
             else if (st.body.optJSONObject("bluetoothRollbackImpact")?.optString("accountOid") != observed.getString("oid"))
                 st.body.remove("bluetoothRollbackImpact")
+            if(signingFingerprint!=null && st.body.optString("signingFingerprint")!=signingFingerprint)
+                SyncV2Codec.fail("choice_stale")
             accountReplaceMetadata(st,observed,verified.rows,verified.objects,serverRevision?:st.body.optString("metadataServerRevision","0"))
+            st.body.put("metadataSigningFingerprint",signingFingerprint).put("metadataNoteSegmentsRead",noteSegmentsRead)
             // pendingChoice and all local edits remain; P1 product apply gate is not relaxed here.
             fault("cloud-index-ready")
         }
     }
-    fun reuseCloudIndex(window:JSONObject,serverRevision:String):Boolean {
-        val observed=validAccount(window);val before=state();val accepted=before.body.optJSONObject("account")?:return false
-        val metadata=before.body.optJSONObject("metadataAccount")?:return false
-        if(before.body.optString("metadataSchema")!=SyncV2HeadPins.schema || metadata.getString("oid")!=observed.getString("oid") || accepted.getString("oid")!=observed.getString("oid"))return false
-        if(observed.getString("generation")!=accepted.getString("generation"))SyncV2Codec.fail("replay_detected")
-        val count=db.controlQuery("SELECT COUNT(*) FROM syncv2_cloud_rows WHERE scope=?",arrayOf(scope)).use{it.moveToFirst();it.getInt(0)}
-        if(count!=before.body.getInt("metadataRows"))return false
-        writer(before.version) { st ->
-            observeInto(st,observed,JSONArray());SyncV2Codec.d64(serverRevision)
-            st.body.put("metadataAccount",observed).put("metadataServerRevision",serverRevision)
+    fun reuseCloudIndex(window:JSONObject,serverRevision:String,signingFingerprint:String,noteSegmentsRead:Boolean):Boolean {
+        val observed=validAccount(window)
+        val current=state()
+        val before=current.body
+        val accepted=before.optJSONObject("account")?:return false
+        if(accepted.getString("oid")==observed.getString("oid") && accepted.getString("generation")!=observed.getString("generation"))
+            SyncV2Codec.fail("replay_detected")
+        if(SyncV2Codec.d64(serverRevision)<SyncV2Codec.d64(before.optString("metadataServerRevision","0")))
+            SyncV2Codec.fail("replay_detected")
+        val reusable=before.optString("metadataSchema")==SyncV2HeadPins.schema &&
+            before.optString("signingFingerprint")==signingFingerprint &&
+            before.optString("metadataSigningFingerprint")==signingFingerprint &&
+            before.optBoolean("metadataNoteSegmentsRead")==noteSegmentsRead &&
+            sameAccount(accepted,observed) && sameAccount(before.optJSONObject("metadataAccount"),observed)
+        if(reusable && !before.isNull("pendingAccountAction")) {
+            // Preserve refresh as a capture boundary for a staged choice/restore.
+            writer(current.version) { st ->
+                observeInto(st,observed,JSONArray())
+                st.body.put("metadataServerRevision",serverRevision)
+            }
         }
-        return true
+        return reusable
     }
+
+    private fun sameAccount(a:JSONObject?,b:JSONObject):Boolean =
+        a!=null && a.optString("oid")==b.getString("oid") && a.optString("revision")==b.getString("revision") &&
+            a.optString("generation")==b.getString("generation")
+
     /** Paging descriptors never SELECTs the original body. */
     fun cloudRowsPage(after:String="",limit:Int=64):List<JSONObject> {
         require(limit in 1..64);ensureActive()
@@ -433,19 +452,27 @@ internal class SyncV2Projection(
         val entities=db.controlQuery("SELECT entity_key FROM syncv2_cloud_rows WHERE scope=?${selected.first} ORDER BY entity_key",selected.second).use{c->buildList{while(c.moveToNext())add(c.getString(0))}}
         return entities.mapRows{entity->db.controlQuery("SELECT body FROM syncv2_cloud_rows WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{c->if(!c.moveToFirst())SyncV2Codec.fail("closure_incomplete");open("cloud-row",c.getBlob(0))}}
     }
-    fun saveSigningBindings(bindings:JSONArray,revocationRevision:String) = writer { st ->
-        SyncV2Codec.d64(revocationRevision)
-        val old=st.body.optString("revocationRevision","0")
-        if(SyncV2Codec.d64(revocationRevision)<SyncV2Codec.d64(old))SyncV2Codec.fail("replay_detected")
-        val oldBindings=st.body.optJSONArray("signingBindings")?:JSONArray()
-        val known=linkedMapOf<String,JSONObject>()
-        for(list in listOf(oldBindings,bindings))for(i in 0 until list.length()) {
-            val value=list.getJSONObject(i);val b=value.getJSONObject("body");val device=b.getString("deviceId")
-            val previous=known[device]?.getJSONObject("body")
-            if(previous!=null && (previous.get("keyId")!=b.get("keyId") || previous.get("publicKey")!=b.get("publicKey")))SyncV2Codec.fail("identity_conflict")
-            known[device]=value
+    fun saveSigningBindings(bindings:JSONArray,revocationRevision:String,fingerprint:String?=null) {
+        val revision=SyncV2Codec.d64(revocationRevision)
+        val before=state()
+        fun checkRevision(body:JSONObject) {
+            if(revision<SyncV2Codec.d64(body.optString("revocationRevision","0")))SyncV2Codec.fail("replay_detected")
         }
-        st.body.put("signingBindings",JSONArray(known.toSortedMap().values.toList())).put("revocationRevision",revocationRevision)
+        checkRevision(before.body)
+        if(fingerprint!=null && before.body.optString("signingFingerprint")==fingerprint)return
+        writer(before.version) { st ->
+            checkRevision(st.body)
+            val oldBindings=st.body.optJSONArray("signingBindings")?:JSONArray()
+            val known=sortedMapOf<String,JSONObject>()
+            for(list in listOf(oldBindings,bindings))for(i in 0 until list.length()) {
+                val value=list.getJSONObject(i);val b=value.getJSONObject("body");val device=b.getString("deviceId")
+                val previous=known[device]?.getJSONObject("body")
+                if(previous!=null && (previous.get("keyId")!=b.get("keyId") || previous.get("publicKey")!=b.get("publicKey")))SyncV2Codec.fail("identity_conflict")
+                known[device]=value
+            }
+            st.body.put("signingBindings",JSONArray(known.values.toList())).put("revocationRevision",revocationRevision)
+            st.body.put("signingFingerprint",fingerprint).remove("metadataSigningFingerprint")
+        }
     }
     fun cloudObjects():Map<String,ByteArray> {
         ensureActive();val ids=db.controlQuery("SELECT oid FROM syncv2_cloud_objects WHERE scope=?",arrayOf(scope)).use{c->buildSet{while(c.moveToNext())add(c.getString(0))}}
@@ -1029,6 +1056,7 @@ internal class SyncV2Projection(
             project(notes,id,local,st.revision,st.body.optJSONObject("account"),true,st.body,st.body,forceFork=true)
         }
         st.body.optJSONObject("noteForkSources")?.let{sources->for(entity in sources.keys().asSequence().toList())if(!isolated.has(entity))sources.remove(entity)}
+        st.body.remove("metadataSigningFingerprint")
         st.body.put("metadataTreeRoot",root)
         st.body.put("metadataAccount",account).put("metadataStatus","metadata-ready").put("metadataSchema",SyncV2HeadPins.schema)
             .put("metadataRows",rows.size).put("metadataServerRevision",serverRevision)
@@ -1046,11 +1074,26 @@ internal class SyncV2Projection(
             current.body.put("accountFileRevision",token)
         }
     }
-    internal fun accountContact(utc:Long,forceRebuild:Boolean=false) {
+    internal fun isUnchangedAccount(st:State):Boolean {
+        val body=st.body
+        val account=body.optJSONObject("account")?:return false
+        return sameAccount(body.optJSONObject("appliedAccount"),account) &&
+            sameAccount(body.optJSONObject("metadataAccount"),account) &&
+            body.optString("activeGeneration")==account.getString("generation") &&
+            st.revision==body.optString("acknowledgedLocalRevision","0") &&
+            !body.optBoolean("unknownEditBase") && !body.optBoolean("projectionRebuildRequired") &&
+            (body.optJSONArray("contentPendingIds")?.length()?:0)==0 &&
+            listOf("pendingAccountAction","pendingPublish","pendingAppliedAck","pendingChoice").all(body::isNull) &&
+            isWindowComplete(st)
+    }
+
+    internal fun accountContact(utc:Long,forceRebuild:Boolean=false,unchanged:Boolean=false) {
         val st=state();val before=st.body.optLong("lastAccountContactUtc",utc)
         if(utc<before)SyncV2Codec.fail("trusted_time_unavailable")
         val rebuild=forceRebuild || utc-before>=604800000L
-        if(!rebuild && st.body.has("lastAccountContactUtc") && utc==before)return
+        // Persist a coarse contact time on unchanged rounds. An app restart can
+        // therefore only cause an earlier safety rebuild, never postpone one.
+        if(!rebuild && st.body.has("lastAccountContactUtc") && (utc==before || unchanged && utc-before<86_400_000L))return
         writer(st.version){current->
             current.body.put("lastAccountContactUtc",utc)
             if(rebuild){current.body.put("projectionRebuildRequired",true);db.execSQL("DELETE FROM syncv2_scan WHERE scope=?",arrayOf(scope))}
@@ -1401,14 +1444,16 @@ internal class SyncV2Projection(
     /** Observe completion in one short SQLite snapshot; never acknowledge only an old tail R1.
      * A business write between state() and this snapshot also requires another window.
      */
-    internal fun isWindowComplete():Boolean {
-        state()
+    internal fun isWindowComplete(expected:State?=null):Boolean {
+        if(expected==null)state()
         db.beginTransaction()
         try {
-            val body=readState().body
+            val st=readState()
+            if(expected!=null && st.version!=expected.version)return false
+            val body=st.body
             val current=SyncV2BusinessWitness.peek(db)?.encoded()?:return false
             if(body.optString("businessStamp")!=current || body.has("tailR1Seq") || body.has("reconcileStamp") ||
-                body.optString("reconciledStamp")!=current || body.optString("reconciledSemantics")!=reconciliationSemantics())return false
+                body.optString("reconciledStamp")!=current || body.optString("reconciledSemantics")!=reconciliationSemantics(body.optString("businessEpoch","0")))return false
             val queued=db.controlQuery("SELECT COALESCE(MAX(seq),0) FROM syncv2_outbox WHERE scope=?",arrayOf(scope)).use{it.moveToFirst();it.getLong(0)}
             return queued<=body.optLong("tailSeq",0)
         } finally {db.endTransaction()}
@@ -1503,11 +1548,12 @@ internal class SyncV2Projection(
         return true
     }
 
-    private fun reconciliationSemantics()=SyncV2Codec.hash(JSONArray(SyncV2Schema.domains.map{binding(it,"p1-local-v1")}))
-    private fun binding(domain: SyncV2Schema.Domain, capability: String): String = SyncV2Codec.hash(JSONObject()
+    private fun reconciliationSemantics(epoch:String=readState().body.optString("businessEpoch","0"))=
+        SyncV2Codec.hash(JSONArray(SyncV2Schema.domains.map{binding(it,"p1-local-v1",epoch)}))
+    private fun binding(domain: SyncV2Schema.Domain, capability: String, epoch:String=readState().body.optString("businessEpoch","0")): String = SyncV2Codec.hash(JSONObject()
         .put("schema",SyncV2Schema.semanticBinding(db,listOf(domain.table)+when(domain.table){"notes"->listOf("note_conflicts");"phone_articles"->listOf("article_register_provenance");"imported_books"->listOf("imported_book_chapters");"note_assets"->listOf(SyncV2NoteAssetNames.aliases,SyncV2NoteAssetNames.source);else->emptyList()}))
         .put("bodyAssetMapping",2).put("scope",identity.scope).put("descriptor",identity.descriptorOid).put("account",identity.accountId).put("capability",capability)
-        .put("businessEpoch",readState().body.optString("businessEpoch","0")))
+        .put("businessEpoch",epoch))
     private fun completedScan(domainName:String,capability:String,stamp:String):Boolean {
         val domain=SyncV2Schema.domains.single{it.table==domainName};val bind=binding(domain,capability)
         return db.controlQuery("SELECT complete,binding,business_stamp FROM syncv2_scan WHERE scope=? AND domain=?",arrayOf(scope,domainName)).use{c->c.moveToFirst() && c.getInt(0)==1 && c.getString(1)==bind && c.getString(2)==stamp}

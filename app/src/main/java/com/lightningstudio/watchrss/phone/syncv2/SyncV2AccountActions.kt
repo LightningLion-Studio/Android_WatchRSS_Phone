@@ -1034,9 +1034,19 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             SyncV2RecoveryStorage.Bundle(copy,pin,objects.filterKeys{it.startsWith("local-recovery$suffix/")}.mapKeys{it.key.removePrefix("local-recovery$suffix/")})
         }
     }
-    private fun upload(objects: Map<String, ByteArray>, actionId: String, capture: ChoiceCapture) {
+    private class PublicationWindowChanged : Exception()
+
+    private fun upload(
+        objects: Map<String, ByteArray>,
+        actionId: String,
+        capture: ChoiceCapture,
+        publicationMayHaveBeenSent: Boolean
+    ) {
         val upload = SyncV2ControlUpload(client, capture.accountOid, capture.accountRevision,
-            capture.generation, ::now, ::id, "choice_stale")
+            capture.generation, ::now, ::id, "choice_stale", onAccountChanged = {
+                if (publicationMayHaveBeenSent) throw PublicationWindowChanged()
+                throw SyncV2CloudError("choice_stale")
+            })
         upload.objects(
             objects.keys.filter { it.substringBefore(':') in setOf("meta", "state", "tree", "commit") }.sorted(),
             objects::getValue,
@@ -1173,12 +1183,26 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             if(kind=="cloud"){markPublicationAttempted(action);client.chooseCloud(request)}else {
                 val known=client.requestResult(id)
                 if(known.getString("status")=="succeeded")known.getJSONObject("response")else {
-                    SyncV2ChoiceDiagnostics.at("resume.upload") {
-                        upload(if(kind=="rollback")objects.selectObjects{it==request.getJSONObject("account").getJSONObject("body").getString("newCommitOid")}else objects,id,
-                            ChoiceCapture.restore(action.getJSONObject("capture")))
+                    val recovered = try {
+                        SyncV2ChoiceDiagnostics.at("resume.upload") {
+                            val candidates = if (kind == "rollback") {
+                                val commitOid = request.getJSONObject("account").getJSONObject("body").getString("newCommitOid")
+                                objects.selectObjects { it == commitOid }
+                            } else objects
+                            upload(candidates, id, ChoiceCapture.restore(action.getJSONObject("capture")),
+                                publicationMayHaveBeenSent = action.opt("publicationAttempted") != false)
+                        }
+                        null
+                    } catch (_: PublicationWindowChanged) {
+                        // The earlier publish may have moved the account while this upload was resuming.
+                        // If its receipt is still unknown, replay the original request for the server to decide.
+                        client.requestResult(id).takeIf { it.getString("status") == "succeeded" }
+                            ?.getJSONObject("response")
                     }
-                    markPublicationAttempted(action)
-                    SyncV2ChoiceDiagnostics.at("resume.publish") { client.publish(action.getJSONObject("request")) }
+                    recovered ?: run {
+                        markPublicationAttempted(action)
+                        SyncV2ChoiceDiagnostics.at("resume.publish") { client.publish(action.getJSONObject("request")) }
+                    }
                 }
             }
         }catch(e:SyncV2CloudError){

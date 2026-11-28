@@ -12,8 +12,11 @@ internal class SyncV2ControlUpload(
     private val expectedGeneration: String,
     private val now: () -> Long,
     private val requestId: () -> String,
-    private val conflictCode: String,
-    initialWindow: JSONObject? = null
+    conflictCode: String,
+    initialWindow: JSONObject? = null,
+    private val onAccountChanged: () -> Nothing = {
+        throw SyncV2CloudError(conflictCode, retryable = conflictCode == "ref_conflict")
+    }
 ) {
     private var window = initialWindow
 
@@ -24,7 +27,7 @@ internal class SyncV2ControlUpload(
         val oid = if (account.isNull("commitOid")) null else account.getString("commitOid")
         if (oid != expectedOid || account.getString("revision") != expectedRevision ||
             account.getString("rollbackGeneration") != expectedGeneration
-        ) throw SyncV2CloudError(conflictCode, retryable = conflictCode == "ref_conflict")
+        ) onAccountChanged()
         return current
     }
 

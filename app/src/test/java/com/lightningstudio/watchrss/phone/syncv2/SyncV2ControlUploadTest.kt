@@ -1,7 +1,9 @@
 package com.lightningstudio.watchrss.phone.syncv2
 
 import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.RecordedRequest
 import okhttp3.mockwebserver.SocketPolicy
+import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -38,6 +40,75 @@ class SyncV2ControlUploadTest {
         assertEquals(listOf("negotiate", "objects/have-want"), live.requests.drop(have + 1).take(2))
         assertEquals(1, live.publishCalls)
         assertTrue(live.projection.state().body.isNull("pendingAccountAction"))
+        assertEquals("offline\nline\n", live.text())
+    }
+
+    @Test fun resumedUploadUsesReceiptWhenPriorPublishCommitsDuringWindowRenewal() =
+        resumeAfterDelayedPublish(receiptVisible = true)
+
+    @Test fun resumedUploadReplaysOriginalRequestWhenReceiptStillUnknownAfterWindowRenewal() =
+        resumeAfterDelayedPublish(receiptVisible = false)
+
+    private fun resumeAfterDelayedPublish(receiptVisible: Boolean) = SyncV2P5Fixture().use { live ->
+        live.pending()
+        val actions = live.actions()
+        val dispatch = checkNotNull(live.f.route)
+        var delayedPublish: RecordedRequest? = null
+        var originalBody: String? = null
+        var requestLookups = 0
+        var renewalTriggered = false
+        live.f.route = { request ->
+            val route = request.requestUrl!!.encodedPath.substringAfter("/functions/v1/sync/v2/")
+            when {
+                route.startsWith("requests/") -> {
+                    requestLookups++
+                    if (renewalTriggered && !receiptVisible) {
+                        live.f.response(live.f.dto().put("status", "unknown").put("response", JSONObject.NULL))
+                    } else dispatch(request)
+                }
+                route == "account/publish" && delayedPublish == null -> {
+                    delayedPublish = request
+                    originalBody = request.body.clone().readUtf8()
+                    live.error("temporarily_unavailable", 503)
+                }
+                route == "objects/have-want" && delayedPublish != null && !renewalTriggered -> {
+                    assertEquals(2, requestLookups)
+                    dispatch(checkNotNull(delayedPublish))
+                    assertEquals(1, live.results.size)
+                    renewalTriggered = true
+                    live.windowId = "34".repeat(16)
+                    live.error("window_expired", 410)
+                }
+                route == "account/publish" -> {
+                    assertEquals(originalBody, request.body.clone().readUtf8())
+                    dispatch(request)
+                }
+                else -> dispatch(request)
+            }
+        }
+
+        val error = assertThrows(SyncV2CloudError::class.java) { actions.choose(actions.preview(), "local") }
+        assertEquals("temporarily_unavailable", error.code)
+        val pending = live.projection.state().body.getJSONObject("pendingAccountAction")
+        assertTrue(pending.getBoolean("publicationAttempted"))
+        assertTrue(live.results.isEmpty())
+        val id = pending.getString("id")
+        val expectedOid = pending.getJSONObject("request").getJSONObject("account")
+            .getJSONObject("body").getString("newCommitOid")
+        live.reopen()
+
+        val result = checkNotNull(live.actions().resume())
+
+        assertTrue(renewalTriggered)
+        assertEquals(3, requestLookups)
+        assertEquals(if (receiptVisible) 1 else 2, live.publishCalls)
+        assertEquals(expectedOid, result.getJSONObject("account").getString("commitOid"))
+        assertTrue(result.getBoolean("localCommitted"))
+        val state = live.projection.state().body
+        assertTrue(state.isNull("pendingAccountAction"))
+        assertTrue(state.isNull("accountActionError"))
+        assertEquals(id, state.getJSONObject("accountActionReceipt").getString("id"))
+        assertEquals(id, state.getString("appliedRequestId"))
         assertEquals("offline\nline\n", live.text())
     }
 

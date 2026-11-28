@@ -695,9 +695,10 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         val action=JSONObject().put("id",requestId).put("kind",choice).put("capture",c.json()).put("serverTime",now()).put("fileCapture",plan.files).put("legacySelected",JSONArray(plan.legacySelected))
         if(plan.root!=null)action.put("sparseBaseRoot",plan.root).put("sparseIds",JSONArray(plan.scopeIds.sorted()))
         val index=if(choice=="cloud")null else wireIndex(target,keyVersion,remote,plan.root,plan.scopeIds,context.authors)
-        if(index!=null && plan.root!=null)action.put("retiredTrees",JSONArray(index.retiredTrees.sorted()))
-        val objects=SyncV2Spool(db).apply{if(index!=null)putAll(index.objects.selectObjects{it !in index.reused})}
+        var objects:SyncV2Spool?=null
         try {
+        if(index!=null && plan.root!=null)action.put("retiredTrees",JSONArray(index.retiredTrees.sorted()))
+        objects=SyncV2Spool(db).apply{if(index!=null)putAll(index.objects.selectObjects{it !in index.reused})}
         if(index==null)action.put("request",JSONObject().put("requestId",requestId).put("choiceId",requestId).put("expectedAccountRevision",c.accountRevision).put("expectedRollbackGeneration",c.generation).put("selectedLocalChangeRevision",c.localChangeRevision))
         else publication(action,c,context,index,objects,if(choice=="local")"resolve-local"else"resolve-merge",null,writerState)
         val publishTarget=if(choice=="cloud")emptyList() else target.mapRows{r->
@@ -708,7 +709,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             r
         }
         stage(c,action,publishTarget,objects,bundles,true,captured,writerState)
-        } finally {objects.close();index?.close()}
+        } finally {objects?.close();index?.close()}
     }
     fun rollback(capture:ChoiceCapture,targetOid:String):JSONObject {
         gate();syncFiles();complete();projection.accountCheck(projection.state(),capture,false);SyncV2Codec.next(capture.stateVersion);SyncV2Codec.commitOid(targetOid)

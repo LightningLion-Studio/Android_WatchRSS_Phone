@@ -267,7 +267,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
                 val original=base.second?.let{value->SyncV2Business.project(meta.getString("kind"),meta.getString("logicalId"),entity,value,null).also {
                     it.meta.put("addedAtSource",meta.getString("addedAtSource"))
                 }}
-                localEdit=st.body.optJSONObject("editBase")?.optString("accountOid")==account.getString("commitOid") &&
+                localEdit=entity in localIndex.restoredOriginals || st.body.optJSONObject("editBase")?.optString("accountOid")==account.getString("commitOid") &&
                     base.first && original!=null && SyncV2Codec.canonical(original.meta)==SyncV2Codec.canonical(meta) && SyncV2Codec.canonical(original.state)==SyncV2Codec.canonical(remoteState)
                 if(!preservesConflictFacts && !localEdit)SyncV2Codec.fail("merge_unavailable")
             }
@@ -357,7 +357,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         val id=randomId();val old=if(account.isNull("commitOid"))null else account.getString("commitOid")
         val request=JSONObject().put("account",SyncV2CloudClient.refUpdate(signer,identity.scope,"refs/account/current",old,account.getString("revision"),oid,id,now()))
             .put("device",SyncV2CloudClient.refUpdate(signer,identity.scope,"refs/devices/${signer.deviceId}/index",own,revision,oid,id,now())).put("relayGrant",JSONObject.NULL)
-        fun persist() = projection.persistPublish(request,publishState.version,localIndex.heldOriginals)
+        fun persist() = projection.persistPublish(request,publishState.version,localIndex.heldOriginals,localIndex.heldBaselines)
         if (files != null && fileRevision != null) CloudExportFileWitness.withProjectionCapture(files,fileRevision,::persist)
         else persist()
         val response = publishAttempt(request)

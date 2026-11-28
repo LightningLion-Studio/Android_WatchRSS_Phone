@@ -72,7 +72,8 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
         throw SyncV2ProtocolError("closure_incomplete", MissingSource(reason, cause))
 
 
-    private fun sources(record:JSONObject,maxBytes:Long?=null,onUnregisteredNoteAsset:((String)->Unit)?=null):List<Pair<String,Source>> {
+    private fun sources(record:JSONObject,maxBytes:Long?=null,onUnregisteredNoteAsset:((String)->Unit)?=null,
+        reuseCloudNoteAssets:Boolean=false):List<Pair<String,Source>> {
         val m=record.getJSONObject("meta");val id=m.getString("logicalId");val value=record.getJSONObject("value")
         if(SyncV2Business.logicalId(m.getString("kind"),value)!=id || identity.entity(m.getString("kind"),id)!=m.getString("entityKey"))SyncV2Codec.fail("identity_conflict")
         return when(m.getString("kind")) {
@@ -105,6 +106,7 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
             "note"->{
                 val keys=SyncV2BodyRepository.noteReferences(value).sorted()
                 keys.mapNotNull {name->
+                    if (reuseCloudNoteAssets && reusableNoteAsset(name)) return@mapNotNull null
                     if (!SyncV2NoteAssetNames.exists(db, name) && onUnregisteredNoteAsset != null) {
                         try {
                             onUnregisteredNoteAsset(name)
@@ -144,6 +146,13 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
 
     fun isMissingOriginal(error: Exception): Boolean = error.cause is MissingSource
 
+    private fun reusableNoteAsset(key: String): Boolean {
+        val (meta, state) = projection.candidate("asset", key) ?: return false
+        if (state.has("projectionRemoved") || state.getJSONObject("payload").getBoolean("deleted")) return false
+        val remote = projection.cloudRows(setOf(meta.getString("entityKey"))).singleOrNull()
+        return SyncV2BodyIdentity.reusable(meta, remote)
+    }
+
     /** Check publication without reading the whole article or applying the recovery-copy quota. */
     fun publicationFailure(record: JSONObject, prior: JSONObject?,
         onUnregisteredNoteAsset: ((String) -> Unit)? = null): Exception? {
@@ -155,7 +164,7 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
             SyncV2BodyIdentity.reusable(meta, prior) ||
             prior != null && SyncV2LocalJson.canonical(meta) == SyncV2LocalJson.canonical(prior.getJSONObject("meta")) &&
                 SyncV2LocalJson.canonical(state) == SyncV2LocalJson.canonical(prior.getJSONObject("state"))) return null
-        if (kind != "article") return contentFailure(record, onUnregisteredNoteAsset)
+        if (kind != "article") return contentFailure(record, onUnregisteredNoteAsset, reuseCloudNoteAssets = true)
         return try {
             val id = meta.getString("logicalId")
             articleLengths(id, record.getJSONObject("value"), requireBody = true)
@@ -179,10 +188,11 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
 
     fun contentReady(record: JSONObject): Boolean = contentFailure(record) == null
 
-    fun contentFailure(record: JSONObject, onUnregisteredNoteAsset: ((String) -> Unit)? = null): Exception? {
+    private fun contentFailure(record: JSONObject, onUnregisteredNoteAsset: ((String) -> Unit)? = null,
+        reuseCloudNoteAssets: Boolean = false): Exception? {
         if (record.getJSONObject("state").getJSONObject("payload").optBoolean("deleted")) return null
         return try {
-            sources(record, onUnregisteredNoteAsset = onUnregisteredNoteAsset)
+            sources(record, onUnregisteredNoteAsset = onUnregisteredNoteAsset, reuseCloudNoteAssets = reuseCloudNoteAssets)
             null
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e

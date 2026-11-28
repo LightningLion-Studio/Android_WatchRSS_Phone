@@ -506,7 +506,7 @@ internal class SyncV2Projection(
         if(aliases.size<256)return
         }
     }
-    fun requestConcurrentChoice()=writer {st->st.body.put("tailChoicePending",true);refreshPending(st.body)}
+    fun requestConcurrentChoice(expectedVersion:String?=null)=writer(expectedVersion) {st->st.body.put("tailChoicePending",true);refreshPending(st.body)}
     /** CPU, HTTP and file work finishes before this short writer. No business body is replaced. */
     fun attachContentRecipe(captured:JSONObject,recipeOid:String,recipe:JSONObject) {
         SyncV2Wire.oid(recipeOid,"recipe");SyncV2ContentCodec.recipe(recipe)
@@ -620,7 +620,8 @@ internal class SyncV2Projection(
             st.body.put("reservedDeviceSequence",it)
         }
     }
-    fun persistPublish(request:JSONObject,expectedVersion:String,heldOriginals:Set<String> = emptySet()) = writer(expectedVersion) { st ->
+    fun persistPublish(request:JSONObject,expectedVersion:String,heldOriginals:Set<String> = emptySet(),
+        heldBaselines:JSONObject = JSONObject()) = writer(expectedVersion) { st ->
         if(!st.body.isNull("pendingChoice"))SyncV2Codec.fail("choice_pending")
         val bytes=SyncV2Codec.canonical(request)
         val id=request.getJSONObject("account").getJSONObject("body").getString("requestId")
@@ -628,6 +629,7 @@ internal class SyncV2Projection(
         if(pending!=null && SyncV2Codec.canonical(pending)!=bytes)SyncV2Codec.fail("idempotency_conflict")
         SyncV2Codec.unhex(id,16);st.body.put("pendingPublish",JSONObject(bytes)).put("pendingPublishLocalRevision",st.revision)
         if(heldOriginals.isNotEmpty())st.body.put("pendingPublishHeldOriginals",JSONArray(heldOriginals.sorted()))
+        if(heldBaselines.length()>0)st.body.put("pendingPublishHeldBaselines",heldBaselines)
     }
     fun pendingPublish():JSONObject? = state().body.optJSONObject("pendingPublish")?.let {JSONObject(it.toString())}
     /** Definitive CAS rejection invalidates only this signed attempt, never its edits or sealed objects. */
@@ -637,6 +639,7 @@ internal class SyncV2Projection(
         if(SyncV2Codec.canonical(pending)!=SyncV2Codec.canonical(request))SyncV2Codec.fail("choice_stale")
         st.body.remove("pendingPublish")
         st.body.remove("pendingPublishHeldOriginals");st.body.remove("pendingPublishHeldBooks")
+        st.body.remove("pendingPublishHeldBaselines")
     }
     fun confirmPublish(request:JSONObject,response:JSONObject) = writer { st ->
         val pending=st.body.optJSONObject("pendingPublish")?:SyncV2Codec.fail("choice_stale")
@@ -646,8 +649,10 @@ internal class SyncV2Projection(
         st.body.put("publishedReceipt",response).put("publishedLocalRevision",st.body.opt("pendingPublishLocalRevision")?:JSONObject.NULL).remove("pendingPublish")
         st.body.remove("pendingPublishLocalRevision")
         val held=originalIds(st.body,"pendingPublishHeldOriginals")+originalIds(st.body,"pendingPublishHeldBooks")
+        st.body.optJSONObject("pendingPublishHeldBaselines")?.let{rememberHeldBaselines(st,it)}
         if(held.isNotEmpty())st.body.put("heldOriginals",JSONArray((heldOriginals(st)+held).sorted()))
         st.body.remove("pendingPublishHeldOriginals");st.body.remove("pendingPublishHeldBooks")
+        st.body.remove("pendingPublishHeldBaselines")
         // Signature+ancestry must still authenticate account observation. Never clear edits here.
     }
     fun saveEventCursor(cursor:String) = writer { st ->
@@ -657,7 +662,7 @@ internal class SyncV2Projection(
     }
     internal fun objectSpool()=SyncV2Spool(db)
     internal var lastWireIndex:WireIndex?=null
-    data class WireIndex(val tree:SyncV2Index.Tree,val objects:Map<String,ByteArray>,val refs:List<JSONObject>,val reused:Set<String> = emptySet(),val retiredTrees:Set<String> = emptySet(),val noteMetadata:Map<String,JSONObject> = emptyMap(),val reservations:List<AutoCloseable> = emptyList(), val proposedRows: List<JSONObject> = emptyList(), val heldOriginals:Set<String> = emptySet()):AutoCloseable {
+    data class WireIndex(val tree:SyncV2Index.Tree,val objects:Map<String,ByteArray>,val refs:List<JSONObject>,val reused:Set<String> = emptySet(),val retiredTrees:Set<String> = emptySet(),val noteMetadata:Map<String,JSONObject> = emptyMap(),val reservations:List<AutoCloseable> = emptyList(), val proposedRows: List<JSONObject> = emptyList(), val heldOriginals:Set<String> = emptySet(),val heldBaselines:JSONObject = JSONObject(),val restoredOriginals:Set<String> = emptySet()):AutoCloseable {
         override fun close(){reservations.forEach{it.close()};(objects as? AutoCloseable)?.close()}
     }
     fun prepareWireIndex(signer:SyncV2Signing,contentKey:ByteArray,keyVersion:Long,resetAdditions:Boolean=false, ids:Set<String>?=null, publicationFailure:((JSONObject,JSONObject?)->Exception?)?=null):WireIndex {
@@ -674,6 +679,7 @@ internal class SyncV2Projection(
         val current=cloudRows(ids).indexRows()
         val previouslyHeld=heldOriginals(before)
         val heldOriginals=linkedSetOf<String>()
+        val restoredOriginals=linkedSetOf<String>()
         val currentObjects = if (ids == null) cloudObjects() else null
         fun currentObject(oid: String): ByteArray? = if (currentObjects != null) currentObjects[oid]
             else if (cloudObjectExists(oid)) accountObject(oid) else null
@@ -723,17 +729,30 @@ internal class SyncV2Projection(
             if (kind in SyncV2BodyIdentity.originalKinds && !state.getJSONObject("payload").getBoolean("deleted")) {
                 val unchanged = remote != null && SyncV2Codec.canonical(meta) == SyncV2Codec.canonical(remote.getJSONObject("meta")) &&
                     SyncV2Codec.canonical(state) == SyncV2Codec.canonical(remote.getJSONObject("state"))
-                // A restored original belonging to a competing local version requires an explicit choice.
-                val competing = !unchanged && remote != null && entity in previouslyHeld
                 val candidate = if (resetMerge) SyncV2Business.join(kind,meta,state) else projected
                 val record = JSONObject().put("meta",meta).put("state",state).put("value",candidate)
-                val failure = if (competing) null else publicationFailure?.invoke(record,remote)
-                if (competing || failure != null) {
+                val failure = publicationFailure?.invoke(record,remote)
+                if (failure != null) {
                     heldOriginals.add(entity)
-                    if (failure != null && entity !in previouslyHeld) SyncV2ChoiceDiagnostics.warn(
+                    if (entity !in previouslyHeld) SyncV2ChoiceDiagnostics.warn(
                         "publish.contentReady",failure,meta,
                         SyncV2RecoveryStorage.contentFailureReason(failure))
                     continue
+                }
+                if (!unchanged && entity in previouslyHeld) {
+                    if (publicationFailure == null) {
+                        heldOriginals.add(entity)
+                        continue
+                    }
+                    val baseline = before.body.optJSONObject("heldOriginalBaselines")?.opt(entity)
+                    // Legacy holds have no row witness. A current competing row needs a choice.
+                    val currentDigest = remote?.let { SyncV2Codec.hash(it.getJSONObject("row")) } ?: JSONObject.NULL
+                    val cloudChanged = if (baseline == null) remote != null else baseline != currentDigest
+                    if (cloudChanged) {
+                        requestConcurrentChoice(before.version)
+                        SyncV2Codec.fail("merge_unavailable")
+                    }
+                    restoredOriginals.add(entity)
                 }
             }
             val hash = if (resetMerge) SyncV2Codec.hash(JSONObject().put("local", c[5])
@@ -840,7 +859,8 @@ internal class SyncV2Projection(
             else SyncV2Index.Tree(sparsePublicationRoot(before) ?: SyncV2Codec.fail("closure_incomplete"), emptyMap())
         objects.putAll(tree.objects)
         try {if(prepared.isNotEmpty())writer(before.version) { _ -> for((entity,value)in prepared)db.execSQL("INSERT OR REPLACE INTO syncv2_wire_candidates VALUES(?,?,?)",arrayOf(scope,entity,value)) }} finally {prepared.close()}
-        val built=WireIndex(tree,objects,refs,if (currentObjects != null) objects.keys.intersect(currentObjects.keys) else objects.keys.filter(::cloudObjectExists).toSet(),proposedRows=rows,heldOriginals=heldOriginals)
+        val built=WireIndex(tree,objects,refs,if (currentObjects != null) objects.keys.intersect(currentObjects.keys) else objects.keys.filter(::cloudObjectExists).toSet(),proposedRows=rows,heldOriginals=heldOriginals,
+            heldBaselines=heldBaselines(heldOriginals,current),restoredOriginals=restoredOriginals)
         reservations.forEach{it.close()}
         // The caller owns each returned index. Preparing another index must not
         // invalidate bytes that a concurrent/previous preparation still references.
@@ -1027,6 +1047,20 @@ internal class SyncV2Projection(
 
     internal fun heldOriginals(st:State=state()):Set<String> = originalIds(st.body,"heldOriginals")+originalIds(st.body,"heldBooks")
 
+    internal fun heldBaselines(ids:Set<String>,remote:Map<String,JSONObject>):JSONObject =
+        JSONObject().also { baselines ->
+            for (entity in ids) baselines.put(entity,
+                remote[entity]?.let { SyncV2Codec.hash(it.getJSONObject("row")) } ?: JSONObject.NULL)
+        }
+
+    internal fun rememberHeldBaselines(st:State,added:JSONObject) {
+        val baselines = st.body.optJSONObject("heldOriginalBaselines") ?: JSONObject()
+        val alreadyHeld = heldOriginals(st)
+        // Preserve the original observation across later publications and choices.
+        for (entity in added.keys()) if (entity !in alreadyHeld) baselines.put(entity,added.get(entity))
+        if (baselines.length()>0) st.body.put("heldOriginalBaselines",baselines)
+    }
+
     /** A held candidate stays local until removed locally or represented by the applied row. */
     internal fun retainedOriginals(st:State,before:List<JSONObject>,target:List<JSONObject>,newlyHeld:Set<String> = emptySet()):Set<String> {
         val held=heldOriginals(st)+newlyHeld
@@ -1046,6 +1080,7 @@ internal class SyncV2Projection(
         check(db.inTransaction());if(SyncV2Codec.d64(acknowledgedRevision)>SyncV2Codec.d64(st.revision))SyncV2Codec.fail("choice_stale")
         val stamp=SyncV2BusinessWitness.read(db);val encoded=stamp.encoded();val bindings=accountBindings(sparseIds)
         val before=(beforeRows?:accountLocalRows()).indexRows()
+        val previouslyHeld=this.heldOriginals(st)
         val desired=rows.map{it.getJSONObject("meta").getString("entityKey")}.toSet()
         for(entity in (bindings.keys+before.keys)-desired) {
             if(entity in heldOriginals) {
@@ -1073,8 +1108,9 @@ internal class SyncV2Projection(
                 remove("wire");optJSONObject("row")?.let{it.remove("metaOid");it.remove("stateOid")}
             }}
             val physicalRssChange=d.kind=="article" && id in rss?.changedArticleIds.orEmpty()
-            if(physicalRssChange || !same(semantics(source),semantics(oldSource))) {
-                val footprint=if(!physicalRssChange && prior!=null && same(prior.optJSONObject("value"),value.getJSONObject("value")))prior.opt("localValue")?:JSONObject.NULL
+            val released=entity in previouslyHeld && entity !in heldOriginals
+            if(released || physicalRssChange || !same(semantics(source),semantics(oldSource))) {
+                val footprint=if(!released && !physicalRssChange && prior!=null && same(prior.optJSONObject("value"),value.getJSONObject("value")))prior.opt("localValue")?:JSONObject.NULL
                     else if(d.kind=="rss-state")rss!!.footprint(value.getJSONObject("value"))?:JSONObject.NULL
                     else db.controlQuery("SELECT ${d.key} AS projection_key,${columns(d)} FROM `${sourceTable(d)}` WHERE (${d.key})=?",arrayOf(id)).use{c->if(c.moveToFirst())readStoredRecord(d,c)else if(virtualBaseline)JSONObject(value.getJSONObject("value").toString())else if(entity in heldOriginals)JSONObject.NULL else SyncV2Codec.fail("closure_incomplete")}
                 // Successful-prefix reconciliation keeps tail bodies in place. This virtual
@@ -1092,7 +1128,12 @@ internal class SyncV2Projection(
             if(previous==null || !same(previous.getJSONObject("meta"),m) || !same(previous.getJSONObject("state"),value.getJSONObject("state")))
                 project(d,id,value.getJSONObject("value"),acknowledgedRevision,ownerBody=st.body,forkEdits=false)else accountCatalog.put("candidate",value)
         }
-        val retained=heldOriginals+(if(sparseIds==null)emptySet()else this.heldOriginals(st)-sparseIds)
+        val retained=heldOriginals+(if(sparseIds==null)emptySet()else previouslyHeld-sparseIds)
+        val baselines = st.body.optJSONObject("heldOriginalBaselines")
+        if (baselines != null) {
+            for (entity in baselines.keys().asSequence().toList()) if (entity !in retained) baselines.remove(entity)
+            if (baselines.length()==0) st.body.remove("heldOriginalBaselines")
+        }
         st.body.remove("heldBooks")
         if(retained.isEmpty())st.body.remove("heldOriginals")else st.body.put("heldOriginals",JSONArray(retained.sorted()))
         st.body.put("businessStamp",encoded).put("acknowledgedLocalRevision",acknowledgedRevision)
@@ -1254,7 +1295,7 @@ internal class SyncV2Projection(
             val id=db.controlQuery("SELECT logical_id FROM syncv2_candidates WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{c->if(c.moveToFirst())c.getString(0)else SyncV2Codec.fail("closure_incomplete")}
             val local=db.controlQuery("SELECT noteId AS projection_key,${columns(notes)} FROM notes WHERE noteId=?",arrayOf(id)).use{c->
                 if(!c.moveToFirst())SyncV2Codec.fail("closure_incomplete")
-                readRecord(notes,c)
+                readRecord(notes,c,heldOriginals(st))
             }
             project(notes,id,local,st.revision,st.body.optJSONObject("account"),true,st.body,st.body,forceFork=true)
         }
@@ -1269,15 +1310,15 @@ internal class SyncV2Projection(
     internal fun accountFilesObserved(token:JSONObject, hasRestoredOriginal: () -> Boolean = { false }) {
         val st=state();val old=st.body.optJSONObject("accountFileRevision")
         if(old!=null && SyncV2Codec.canonical(old)==SyncV2Codec.canonical(token))return
-        // A restored local-only original is an addition against the last applied head.
-        // Keep the conservative unknown-base fence for all other file-only observations.
+        // A ready held original already has its own publication baseline.
+        // Keep the conservative unknown-base fence for other file-only observations.
         val canRetryHeld = old != null && isUnchangedAccount(st) && hasRestoredOriginal()
         writer(st.version){current->
-            if(old!=null) {
+            if(old!=null && !canRetryHeld) {
                 val revision=SyncV2Codec.next(current.revision)
                 db.execSQL("UPDATE syncv2_state SET local_revision=? WHERE scope=?",arrayOf(revision,scope))
                 if(current.body.isNull("editBase"))current.body.optJSONObject("appliedAccount")?.let{a->current.body.put("editBase",JSONObject().put("accountOid",a.getString("oid")).put("generation",a.getString("generation")))}
-                if (!canRetryHeld) current.body.put("unknownEditBase",true)
+                current.body.put("unknownEditBase",true)
                 refreshPending(current.body)
             }
             current.body.put("accountFileRevision",token)
@@ -1571,7 +1612,7 @@ internal class SyncV2Projection(
     }
     private fun noteResolutionState(noteId:String):JSONObject {
         val st=readState();val d=SyncV2Schema.domains.single{it.table=="notes"}
-        val value=db.controlQuery("SELECT noteId AS projection_key,${columns(d)} FROM notes WHERE noteId=?",arrayOf(noteId)).use {c->if(c.moveToFirst())readRecord(d,c)else SyncV2Codec.fail("notes_stale")}
+        val value=db.controlQuery("SELECT noteId AS projection_key,${columns(d)} FROM notes WHERE noteId=?",arrayOf(noteId)).use {c->if(c.moveToFirst())readRecord(d,c,heldOriginals(st))else SyncV2Codec.fail("notes_stale")}
         val conflicts=value.getJSONObject("noteConflicts");value.remove("noteConflicts")
         val allTexts=buildString {append(value.getString("markdown"));append(value.getString("baseMarkdown"));append(SyncV2Codec.canonical(conflicts))}
         val hasAssets=db.controlQuery("SELECT 1 FROM note_assets WHERE noteId=? LIMIT 1",arrayOf(noteId)).use{it.moveToFirst()}
@@ -1793,9 +1834,10 @@ internal class SyncV2Projection(
             val last=if(restart)""else cp!![2]
             val ids=sourceKeys(domain,last,limit+1)
             var rows=0;var bytes=0;var keyAt=last;var exhausted=true
+            val held=heldOriginals(st)
             for(id in ids) {
                 if(rows==limit){exhausted=false;break}
-                val value=db.controlQuery("SELECT ${domain.key} AS projection_key,${columns(domain)} FROM `${sourceTable(domain)}` WHERE (${domain.key})=?",arrayOf(id)).use{c->if(c.moveToFirst())readRecord(domain,c)else null}
+                val value=db.controlQuery("SELECT ${domain.key} AS projection_key,${columns(domain)} FROM `${sourceTable(domain)}` WHERE (${domain.key})=?",arrayOf(id)).use{c->if(c.moveToFirst())readRecord(domain,c,held)else null}
                 val size=value?.let{SyncV2Codec.utf8(it.toString()).size}?:0
                 // C7 25.1: long note rows are legitimate local data; the row-size gate for them is
                 // the 2 MiB sealed-note budget, not the ordinary page byte budget.
@@ -1845,6 +1887,7 @@ internal class SyncV2Projection(
                 cursor?.getString("table").orEmpty(), cursor?.getString("key").orEmpty(), limit + 1)
         ).use { c -> buildList { while (c.moveToNext()) add(Triple(c.getString(0), c.getString(1), c.getLong(2))) } }
         val selected = page.take(limit)
+        val held=heldOriginals(st)
         for ((table, id, _) in selected) {
             fault("dirty-key-projected")
             val d = SyncV2Schema.domains.single { it.table == table }
@@ -1855,7 +1898,7 @@ internal class SyncV2Projection(
                 "SELECT ${d.key} AS projection_key,${columns(d)} FROM `${sourceTable(d)}` WHERE $where",
                 keys
             ).use { c ->
-                if (c.moveToFirst()) project(d, id, readRecord(d, c), st.revision,
+                if (c.moveToFirst()) project(d, id, readRecord(d, c, held), st.revision,
                     st.body.optJSONObject("appliedAccount") ?: st.body.optJSONObject("account"),
                     true, st.body, st.body)
                 else markRemoved(d, id, st.revision)
@@ -1915,12 +1958,13 @@ internal class SyncV2Projection(
         db.controlQuery("SELECT seq,revision,table_name,logical_id,base_state FROM syncv2_outbox WHERE scope=? AND seq>? AND seq<=? ORDER BY seq LIMIT ?",arrayOf<Any>(scope,st.body.optLong("tailSeq",0),end,limit)).use {c->
             while(c.moveToNext())entries.add(arrayOf(c.getLong(0),c.getString(1),c.getString(2),c.getString(3),c.getBlob(4)))
         }
+        val held=heldOriginals(st)
         for(e in entries) {
             val table=e[2] as String
             val d=SyncV2Schema.domains.first{it.table==when(table){"note_conflicts"->"notes";"imported_book_chapters"->"imported_books";"article_register_provenance"->"phone_articles";else->table}}
             val id=e[3] as String;val eventAccount=open("state",e[4] as ByteArray).optJSONObject("account")
             db.controlQuery("SELECT ${d.key} AS projection_key,${columns(d)} FROM `${sourceTable(d)}` WHERE (${d.key})=?",arrayOf(id)).use{c->
-                if(c.moveToFirst())project(d,id,readRecord(d,c),st.revision,eventAccount,ownerBody=st.body)else markRemoved(d,id,st.revision)
+                if(c.moveToFirst())project(d,id,readRecord(d,c,held),st.revision,eventAccount,ownerBody=st.body)else markRemoved(d,id,st.revision)
             }
             fault("after-tail-entry");st.body.put("tailSeq",e[0])
         }
@@ -1938,9 +1982,11 @@ internal class SyncV2Projection(
         "note_assets" -> "storageKey,mimeType,displayName,createdAt,deleted,deletedAt"
         else -> SyncV2Codec.fail("unsupported_feature")
     }
-    private fun readRecord(d:SyncV2Schema.Domain,c:Cursor):JSONObject {
-        val raw=readStoredRecord(d,c);val id=c.getString(0)
-        val binding=db.controlQuery("SELECT body FROM syncv2_p5_bindings WHERE scope=? AND entity_key=?",arrayOf(scope,identity.entity(d.kind,id))).use{if(it.moveToFirst())accountOpen("binding",it.getBlob(0))else null}?:return raw
+    private fun readRecord(d:SyncV2Schema.Domain,c:Cursor,held:Set<String>):JSONObject {
+        val raw=readStoredRecord(d,c);val entity=identity.entity(d.kind,c.getString(0))
+        // The held Room row can differ from the installed cloud binding and its footprint.
+        if(entity in held)return raw
+        val binding=db.controlQuery("SELECT body FROM syncv2_p5_bindings WHERE scope=? AND entity_key=?",arrayOf(scope,entity)).use{if(it.moveToFirst())accountOpen("binding",it.getBlob(0))else null}?:return raw
         val footprint=binding.optJSONObject("localValue")?:return raw
         val value=JSONObject(binding.getJSONObject("value").toString())
         for(field in raw.keys())if(SyncV2LocalJson.canonical(raw.opt(field))!=SyncV2LocalJson.canonical(footprint.opt(field)))value.put(field,raw.get(field))
@@ -2081,11 +2127,12 @@ internal class SyncV2Projection(
     /** R2 explicit fork entry: re-homes the current Room content of an isolated note under a new id. */
     fun forkIsolatedNote(entity:String,logicalId:String,nowMillis:Long):JSONObject {
         ensureActive()
-        if(readState().body.optJSONObject("noteIsolation")?.has(entity)!=true)SyncV2Codec.fail("invalid_schema")
+        val current=readState()
+        if(current.body.optJSONObject("noteIsolation")?.has(entity)!=true)SyncV2Codec.fail("invalid_schema")
         val domain=SyncV2Schema.domains.single{it.table=="notes"}
         val row=db.controlQuery("SELECT noteId AS projection_key,${columns(domain)} FROM notes WHERE noteId=?",arrayOf(logicalId)).use{c->
             if(!c.moveToFirst())SyncV2Codec.fail("invalid_schema")
-            readRecord(domain,c)
+            readRecord(domain,c,heldOriginals(current))
         }
         val st=state();val revision=SyncV2Codec.next(st.revision)
         val forkId=noteFork(logicalId)?:("syncv2-fork-"+SyncV2Codec.hex(SyncV2Codec.random(16)))

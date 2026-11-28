@@ -4,6 +4,7 @@ import com.lightningstudio.watchrss.phone.data.book.BookSync
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -69,11 +70,71 @@ class SyncV2MissingOriginalTest {
         assertEquals(emptySet<String>(), fixture.projection.publicationIds())
 
         val restored = fixture.seedBookOriginal(differentId, "restored different original".toByteArray())
-        fixture.edit("edit after original returned")
-        fixture.publishNormally()
-        assertEquals(oldWire.toString(), fixture.wire("book", differentId).toString())
-        assertEquals("edit after original returned", fixture.cloudValue("note", "note").getString("markdown"))
+        val entity = fixture.identity.entity("book", differentId)
+        fixture.actions().refresh()
+        assertTrue(entity in fixture.actions().restoredOriginalIds())
+        fixture.publishNormally(setOf(entity))
+        assertEquals(2, fixture.cloudValue("book", differentId).getInt("chapterCount"))
+        assertEquals(setOf(fixture.identity.entity("book", localId)), fixture.projection.heldOriginals())
         assertTrue(restored.isFile)
+    }
+
+    @Test fun noteEditReusesCloudAttachmentBeforeDownload() = SyncV2P5Fixture().use { fixture ->
+        val storageKey = "cloud.png"
+        val asset = JSONObject().put("assetId", storageKey).put("mime", "image/png")
+            .put("originalFilename", storageKey).put("updatedAt", 0).put("sourceDeviceId", "synthetic-phone")
+            .put("deleted", false).put("deletedAt", 0)
+        val markdown = "![picture](assets/$storageKey)"
+        val values = listOf(fixture.note(markdown = markdown), asset)
+        fixture.advance(values)
+        val assetRow = checkNotNull(fixture.wire("asset", storageKey)).put("bodyRevision", "11".repeat(16)).put("promiseId", "22".repeat(16))
+        fixture.advance(values, mapOf(fixture.identity.entity("asset", storageKey) to assetRow))
+        fixture.start()
+        assertFalse(SyncV2BodyRepository(fixture.sql, fixture.root).file("asset", storageKey).exists())
+
+        fixture.edit("edited $markdown")
+        fixture.publishNormally()
+
+        assertEquals("edited $markdown", fixture.cloudValue("note", "note").getString("markdown"))
+        assertEquals(assetRow.toString(), fixture.wire("asset", storageKey).toString())
+        assertTrue(fixture.projection.heldOriginals().isEmpty())
+    }
+
+    @Test fun readyOriginalWithChangedCloudRowRequestsChoiceAndAcceptsCloud() = SyncV2P5Fixture().use { fixture ->
+        val oldBook = book("ab", 1)
+        val id = oldBook.getString("bookId")
+        val entity = fixture.identity.entity("book", id)
+        fixture.advance(listOf(fixture.note(), oldBook))
+        fixture.start()
+        val localBook = book("ab", 2).put("title", "local book")
+        fixture.sql.execSQL("UPDATE imported_books SET stateJson=? WHERE bookId=?", arrayOf(localBook.toString(), id))
+        fixture.sql.execSQL("INSERT INTO imported_book_chapters VALUES(?,2,?)", arrayOf(id, BookSync.articleId(id, 2)))
+        fixture.drain()
+        fixture.publishNormally()
+        assertEquals(setOf(entity), fixture.projection.heldOriginals())
+
+        fixture.advance(listOf(fixture.note(), oldBook.put("title", "cloud edit")))
+        fixture.reopen()
+        fixture.actions().use { actions ->
+            actions.refresh()
+            assertTrue(actions.restoredOriginalIds().isEmpty())
+            assertEquals("local book", fixture.scalar("SELECT json_extract(stateJson,'$.title') FROM imported_books WHERE bookId=?", id))
+            fixture.seedBookOriginal(id, "restored local original".toByteArray())
+            actions.refresh()
+            assertEquals(setOf(entity), actions.restoredOriginalIds())
+            val conflict = assertThrows(SyncV2ProtocolError::class.java) {
+                fixture.publishNormally(actions.restoredOriginalIds())
+            }
+            assertEquals(conflict.stackTraceToString(), "merge_unavailable", conflict.code)
+            assertFalse(fixture.projection.state().body.isNull("pendingChoice"))
+            assertEquals(1, fixture.publishCalls)
+            assertEquals("local book", fixture.scalar("SELECT json_extract(stateJson,'$.title') FROM imported_books WHERE bookId=?", id))
+
+            assertTrue(actions.choose(actions.preview(), "cloud").getBoolean("localCommitted"))
+            assertEquals("cloud edit", fixture.scalar("SELECT json_extract(stateJson,'$.title') FROM imported_books WHERE bookId=?", id))
+            assertTrue(fixture.projection.heldOriginals().isEmpty())
+            assertTrue(fixture.projection.state().body.isNull("pendingChoice"))
+        }
     }
 
     @Test fun sameIndependentBodyCarriesTheAuthenticatedReferenceWithoutAnOriginal() = SyncV2P5Fixture().use { fixture ->

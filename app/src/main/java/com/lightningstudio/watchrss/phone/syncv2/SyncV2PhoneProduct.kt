@@ -500,22 +500,27 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
                     projection.requestConcurrentChoice();return@withinBudget false
                 }
                 actions.prepareSigning()
-                cloud.publishIndex(vault.signer, keys.read(keys.newestVersion), keys.newestVersion,
-                    publicationRevision, resetAdditions, bodyPublications,
-                    prepareContent = if (contentEnabled) { ids, held ->
-                        val contentIds = ids?.filterTo(linkedSetOf()) {
-                            projection.accountCatalog.kindOf(it) in setOf("article", "book", "asset")
-                        }
-                        if (contentIds?.isEmpty() == true) false else {
-                            bodies?.bindPrepared(contentIds, held)
-                            if (client.contentWriteAllowed() && !articles!!.runPage(remaining(), contentIds, held)) {
-                                SyncV2Codec.fail("budget_paused")
+                try {
+                    cloud.publishIndex(vault.signer, keys.read(keys.newestVersion), keys.newestVersion,
+                        publicationRevision, resetAdditions, bodyPublications,
+                        prepareContent = if (contentEnabled) { ids, held ->
+                            val contentIds = ids?.filterTo(linkedSetOf()) {
+                                projection.accountCatalog.kindOf(it) in setOf("article", "book", "asset")
                             }
-                            true
-                        }
-                    } else null,
-                    observePublished = { hint -> actions.refresh(budgetMillis = remaining(), published = hint) }
-                )
+                            if (contentIds?.isEmpty() == true) false else {
+                                bodies?.bindPrepared(contentIds, held)
+                                if (client.contentWriteAllowed() && !articles!!.runPage(remaining(), contentIds, held)) {
+                                    SyncV2Codec.fail("budget_paused")
+                                }
+                                true
+                            }
+                        } else null,
+                        observePublished = { hint -> actions.refresh(budgetMillis = remaining(), published = hint) }
+                    )
+                } catch (error: SyncV2ProtocolError) {
+                    if (error.code != "merge_unavailable" || projection.state().body.isNull("pendingChoice")) throw error
+                    return@withinBudget false
+                }
             } else actions.flushAppliedAck()
             if(contentEnabled) {
                 val result=bodies?.sync(manual)?:SyncV2BodyChannel.Result(0,emptyList())

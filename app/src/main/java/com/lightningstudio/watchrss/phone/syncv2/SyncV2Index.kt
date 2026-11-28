@@ -139,6 +139,69 @@ internal object SyncV2Index {
         mark(next)
         return Edit(Tree(next,objects.filterKeys{it in reachable}),retired-reachable)
     }
+    data class Delta(val changes: Map<String, JSONObject?>, val edit: Edit)
+
+    /** Compare children under a previously verified root. Rebuild the edited paths
+     * with the canonical writer and require the exact signed target OID. */
+    fun delta(scope: JSONObject, oldRoot: String, newRoot: String,
+        oldObject: (String) -> ByteArray, newObject: (String) -> ByteArray, limit: Int = 64): Delta? {
+        val changes = linkedMapOf<String, JSONObject?>()
+        var visited = 0
+        fun read(oid: String, prefix: String, get: (String) -> ByteArray): JSONObject {
+            SyncV2Wire.oid(oid, "tree")
+            val bytes = get(oid)
+            if (oid.substringAfter(":sha256:") != SyncV2Codec.hex(SyncV2Codec.sha(bytes))) SyncV2Codec.fail("hash_mismatch")
+            return SyncV2Wire.parse(bytes, 262144, true).also {
+                if (it.optString("prefix") != prefix || it.getInt("version") != 2 ||
+                    SyncV2Codec.scope(it.getJSONObject("scope")) != SyncV2Codec.scope(scope)) SyncV2Codec.fail("invalid_schema")
+            }
+        }
+        fun compare(oldOid: String, newOid: String, prefix: String): Boolean {
+            if (oldOid == newOid) return true
+            if (++visited > limit * 4 || prefix.length > 64) return false
+            val old = read(oldOid, prefix, oldObject)
+            val next = read(newOid, prefix, newObject)
+            val form = old.getString("form")
+            if (form != next.getString("form")) return false
+            if (form == "leaf") {
+                fun rows(node: JSONObject): Map<String, JSONObject> {
+                    val values = node.getJSONArray("rows")
+                    if (values.length() > 256) SyncV2Codec.fail("invalid_schema")
+                    return buildMap {
+                        for (i in 0 until values.length()) {
+                            val value = values.getJSONObject(i)
+                            row(value)
+                            val key = value.getString("entityKey")
+                            if (!key.startsWith(prefix) || put(key, value) != null) SyncV2Codec.fail("invalid_schema")
+                        }
+                    }
+                }
+                val before = rows(old)
+                val after = rows(next)
+                for (key in before.keys + after.keys) {
+                    if (SyncV2Codec.canonical(before[key]) != SyncV2Codec.canonical(after[key])) changes[key] = after[key]
+                }
+                return changes.size <= limit
+            }
+            if (form != "node" || prefix.length == 64) SyncV2Codec.fail("invalid_schema")
+            val a = old.getJSONArray("children")
+            val b = next.getJSONArray("children")
+            if (a.length() != b.length() || a.length() !in 1..16) return false
+            for (i in 0 until a.length()) {
+                val previous = a.getJSONObject(i)
+                val current = b.getJSONObject(i)
+                val digit = previous.getString("digit")
+                if (current.getString("digit") != digit) return false
+                if (!compare(previous.getString("oid"), current.getString("oid"), prefix + digit)) return false
+            }
+            return true
+        }
+        if (!compare(oldRoot, newRoot, "")) return null
+        val edit = edit(scope, oldRoot, changes, oldObject)
+        if (edit.tree.root != newRoot) SyncV2Codec.fail("invalid_schema")
+        return Delta(changes, edit)
+    }
+
     /** A point lookup under an already authenticated root, including hash/prefix checks. */
     fun find(scope:JSONObject,root:String,entity:String,get:(String)->ByteArray):JSONObject? {
         SyncV2Codec.unhex(entity,32);var oid=root;var prefix=""

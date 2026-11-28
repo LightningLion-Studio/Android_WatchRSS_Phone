@@ -8,7 +8,7 @@ internal class SyncV2ArticlePublisher(private val projection:SyncV2Projection,pr
     private val keys:SyncV2ContentKeys,private val signer:SyncV2Signing,private val client:SyncV2CloudClient,
     private val store:SyncV2ContentStore,private val worker:SyncV2ContentWorker,private val files:File,
     private val check:()->Unit,private val monotonic:()->Long=android.os.SystemClock::elapsedRealtime) {
-    fun runPage(budgetMillis:Long=280000):Boolean {
+    fun runPage(budgetMillis:Long=280000, ids:Set<String>?=null):Boolean {
         val started=monotonic();val version=keys.newestVersion
         val exporter=SyncV2ContentExport(identity,keys.read(version),version,store)
         val revision=projection.state().revision
@@ -16,7 +16,10 @@ internal class SyncV2ArticlePublisher(private val projection:SyncV2Projection,pr
         // A local edit anywhere invalidates the processed prefix, including across restart.
         val cursor=if(saved?.optString("sourceRevision")==revision)saved.optString("after","")else ""
         fun sourceCurrent(){check();if(projection.state().revision!=revision)SyncV2Codec.fail("source_changed")}
-        val page=projection.accountDatabase.controlQuery("SELECT entity_key,logical_id FROM syncv2_candidates WHERE scope=? AND kind='article' AND entity_key>? ORDER BY entity_key LIMIT 17",arrayOf(projection.scope,cursor)).use{c->buildList{while(c.moveToNext())add(c.getString(0) to c.getString(1))}}
+        if (ids?.isEmpty() == true) return true
+        val filter = ids?.joinToString(",", " AND entity_key IN (", ")") { "?" }.orEmpty()
+        val params = listOf(projection.scope, cursor) + ids.orEmpty()
+        val page=projection.accountDatabase.controlQuery("SELECT entity_key,logical_id FROM syncv2_candidates WHERE scope=? AND kind='article' AND entity_key>?$filter ORDER BY entity_key LIMIT 17",params.toTypedArray()).use{c->buildList{while(c.moveToNext())add(c.getString(0) to c.getString(1))}}
         var remaining=32L*1024*1024
         for((entity,id)in page.take(16)) {
             sourceCurrent();if(monotonic()-started>=budgetMillis || remaining<=0)return false

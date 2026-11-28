@@ -138,21 +138,7 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
     }
 
     private fun assetReference(id: String): AssetReference? {
-        val owners = buildSet {
-            val needle = "assets/$id"
-            db.controlQuery("""
-                SELECT noteId,markdown,baseMarkdown FROM notes WHERE deleted=0
-                    AND (instr(markdown,?)>0 OR instr(baseMarkdown,?)>0)
-            """, arrayOf(needle, needle)).use { row ->
-                while (row.moveToNext()) if ((1..2).any { id in assetKeys(row.getString(it)) }) add("note:" + row.getString(0))
-            }
-            db.controlQuery("""
-                SELECT conflictId,baseMarkdown,localMarkdown,remoteMarkdown FROM note_conflicts
-                    WHERE instr(baseMarkdown,?)>0 OR instr(localMarkdown,?)>0 OR instr(remoteMarkdown,?)>0
-            """, arrayOf(needle, needle, needle)).use { row ->
-                while (row.moveToNext()) if ((1..3).any { id in assetKeys(row.getString(it)) }) add("conflict:" + row.getString(0))
-            }
-        }
+        val owners = SyncV2NoteAssetReferences.owners(db, id)
         if (owners.isEmpty()) return null
         val metadata = SyncV2NoteAssetNames.metadataSource(db)
         val revisions = db.controlQuery("SELECT sha256,byteCount,deleted FROM $metadata WHERE storageKey=?", arrayOf(id)).use { row ->
@@ -240,7 +226,7 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
         val registration = NoteAssetRegistration(id, sha, raw.size) {
             NoteAssetFiles.selection(db, id) == selected && file("asset", id) == target &&
                 target.canonicalFile.parentFile == target.parentFile!!.canonicalFile &&
-                (selected == null || NoteAssetFiles.ownerKeys(db, id).isNotEmpty()) &&
+                (selected == null || SyncV2NoteAssetReferences.owners(db, id, liveOnly = true).isNotEmpty()) &&
                 sameFile(target, observed, sha)
         }
         registration.requireCurrent()
@@ -345,16 +331,20 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
         } else hash
         val bookState=if(kind=="book")db.controlQuery("SELECT stateJson FROM imported_books WHERE bookId=?",arrayOf(id)).use{c->if(!c.moveToFirst())SyncV2Codec.fail("body_revision_changed");JSONObject(c.getString(0))}else null
         if(bookState!=null)validate("book",id,bookState,raw)
-        ConditionalBodyFile.installGuarded(
-            target, raw, expected,
-            beforeStagingCommit = { beforeInstall(target) },
-            beforePublish = {
-                repair?.requireCurrent()
-                checkWindow()
-                repair?.requireSameIdentity()
-            },
-            privateBook = kind == "book"
-        )
+        try {
+            ConditionalBodyFile.installGuarded(
+                target, raw, expected,
+                beforeStagingCommit = { beforeInstall(target) },
+                beforePublish = {
+                    repair?.requireCurrent()
+                    checkWindow()
+                    repair?.requireSameIdentity()
+                },
+                privateBook = kind == "book"
+            )
+        } catch (changed: ConditionalBodyFile.RevisionChanged) {
+            throw SyncV2ProtocolError("body_revision_changed", changed)
+        }
         if(kind=="asset") {
             if (newReference != null) {
                 NoteAssetFiles.publish(db, id, newReference)
@@ -423,9 +413,7 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
             value.optJSONObject("noteConflicts")?.optJSONArray("records")?.let{a->for(i in 0 until a.length())for(k in listOf("baseMarkdown","localMarkdown","remoteMarkdown"))refs.addAll(assetKeys(a.getJSONObject(i).optString(k)))}
             return refs
         }
-        fun references(db:SupportSQLiteDatabase):Set<String> = buildSet {
-            db.controlQuery("SELECT markdown,baseMarkdown FROM notes WHERE deleted=0").use{c->while(c.moveToNext())for(i in 0..1)addAll(assetKeys(c.getString(i)))}
-            db.controlQuery("SELECT baseMarkdown,localMarkdown,remoteMarkdown FROM note_conflicts").use{c->while(c.moveToNext())for(i in 0..2)addAll(assetKeys(c.getString(i)))}
-        }
+        fun references(db: SupportSQLiteDatabase): Set<String> = SyncV2NoteAssetReferences.keys(db)
+
     }
 }

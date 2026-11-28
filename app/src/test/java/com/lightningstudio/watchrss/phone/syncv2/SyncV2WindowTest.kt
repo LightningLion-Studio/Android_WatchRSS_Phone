@@ -37,6 +37,9 @@ class SyncV2WindowTest {
             assertTrue(++rounds<100)
         }
     }
+    private fun loseDirtyCoverage(sql: SupportSQLiteDatabase) {
+        sql.execSQL("UPDATE cloud_local_dirty_floor SET seq=(SELECT seq+1 FROM cloud_local_change_counter)")
+    }
     /** Identical racing insertion and fourth clock callback as the independent review. */
     private fun raceClock(sql:SupportSQLiteDatabase):()->Long {
         var ticks=0
@@ -59,6 +62,7 @@ class SyncV2WindowTest {
         db.syncPeerStateDao().upsert(SyncPeerStateEntity("peer",8,7,0,14,0))
         var a=adapter(db);a.install();finish(a)
         val sql=db.openHelper.writableDatabase;val prefix=prefix(sql)
+        loseDirtyCoverage(sql)
         val first=a.runWindow(maxPages=4096,now=raceClock(sql))
         assertTrue(first.paused);assertEquals(64,first.tailEntries);assertNull(a.candidate("article","zz-new"))
         val body=a.state().body
@@ -85,6 +89,7 @@ class SyncV2WindowTest {
         repeat(100){db.phoneArticleDao().upsert(article("a"+it.toString().padStart(3,'0')))}
         sql.execSQL("INSERT INTO note_assets VALUES('asset','note',?,'old','text/plain',0,'asset',1,0,0,0)",arrayOf("ab".repeat(32)))
         val a=adapter(db);a.install();finish(a)
+        loseDirtyCoverage(sql)
         sql.execSQL("UPDATE note_assets SET displayName='changed' WHERE assetId='asset'")
         var rounds=0
         while(a.state().body.optInt("reconcileDomain",-1)<SyncV2Schema.domains.size){a.catchUp();assertTrue(++rounds<20)}

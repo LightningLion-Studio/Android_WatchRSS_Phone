@@ -219,6 +219,31 @@ class PhoneCloudHeadPollerTest {
         }
     }
 
+    @Test fun cursorBatchesAndImportantEditsHaveIndependentDeadlines() = runTest {
+        val edits = MutableStateFlow(com.lightningstudio.watchrss.phone.data.db.CloudSchedulingSequence(1, 1))
+        val sent = mutableListOf<Pair<Long, Long>>()
+        backgroundScope.launch {
+            debounceScheduledCloudChanges(edits, flowOf(true)) { testScheduler.currentTime }.collect {
+                sent += it.first to testScheduler.currentTime
+            }
+        }
+        runCurrent()
+        for (sequence in 2L..31L) {
+            edits.value = com.lightningstudio.watchrss.phone.data.db.CloudSchedulingSequence(sequence, 1)
+            advanceTimeBy(1_500)
+        }
+        assertTrue(sent.isEmpty())
+        runCurrent()
+        assertEquals(listOf(31L to 45_000L), sent)
+
+        edits.value = com.lightningstudio.watchrss.phone.data.db.CloudSchedulingSequence(32, 32)
+        advanceTimeBy(1_000)
+        edits.value = com.lightningstudio.watchrss.phone.data.db.CloudSchedulingSequence(33, 32)
+        advanceTimeBy(500)
+        runCurrent()
+        assertEquals(33L to 46_500L, sent.last())
+    }
+
     @Test fun editsPublishAfterOneAndAHalfQuietSecondsAndCoalesce() = runTest {
         val edits = MutableSharedFlow<Long>()
         val mode = MutableStateFlow(true)

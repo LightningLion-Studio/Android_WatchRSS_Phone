@@ -175,11 +175,16 @@ internal object SyncV2NoteWiring {
             if (r.getJSONObject("meta").getString("kind") != "note") continue
             val entity = r.getJSONObject("meta").getString("entityKey")
             val owned = outboxOwned(db, scope, entity) || owns(r)
-            val prior = binding(db, scope, entity)
             if (owned) continue // R1/M1: an owned local binding is never overwritten by received data.
+            val prior = binding(db, scope, entity)
             val revision = r.optString(REVISION_KEY).takeIf { it.isNotEmpty() && it != "null" }
-            if (revision != null) putBinding(db, scope, entity, revision, false, false)
-            else removeBinding(db, scope, entity) // The remote note is short again; no reuse anchor is needed.
+            if (revision != null) {
+                if (prior?.optString("noteRevision") != revision || prior.optBoolean("deleted") || prior.optBoolean("invalidated")) {
+                    putBinding(db, scope, entity, revision, false, false)
+                }
+            } else if (prior != null) {
+                removeBinding(db, scope, entity)
+            }
         }
     }
 }

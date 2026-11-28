@@ -14,7 +14,8 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.transformLatest
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.flow
+import com.lightningstudio.watchrss.phone.data.db.CloudSchedulingSequence
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -38,7 +39,7 @@ internal class PhoneCloudChangeScheduler(
     fun start() {
         if (job != null) return
         job = scope.launch {
-            debounceCloudChanges(changes.observeSequence().drop(1), fastMode, android.os.SystemClock::elapsedRealtime)
+            debounceScheduledCloudChanges(changes.observeSchedulingSequence(), fastMode, android.os.SystemClock::elapsedRealtime)
                 .collect { (sequence, observedAt) ->
                     if (!bluetoothGate.awaitAutomaticSync(sequence)) return@collect
                     if (!fastEnabled()) {
@@ -75,6 +76,48 @@ internal fun debounceCloudChanges(
         emit(change)
     }
     .distinctUntilChanged()
+
+private const val CURSOR_CHANGE_INTERVAL_MS = 45_000L
+
+@OptIn(ExperimentalCoroutinesApi::class)
+internal fun debounceScheduledCloudChanges(
+    changes: Flow<CloudSchedulingSequence>,
+    fastMode: Flow<Boolean>,
+    elapsed: () -> Long
+): Flow<Pair<Long, Long>> {
+    val acknowledged = AtomicLong(0)
+    val observed = flow {
+        var previous: CloudSchedulingSequence? = null
+        var lastNonCursorAt = 0L
+        var cursorBatchStartedAt = 0L
+        changes.collect { change ->
+            val prior = previous
+            previous = change
+            if (prior == null) {
+                acknowledged.set(change.sequence)
+                return@collect
+            }
+            val now = elapsed()
+            if (change.lastNonCursor != prior.lastNonCursor) lastNonCursorAt = now
+            if (prior.sequence <= acknowledged.get()) cursorBatchStartedAt = now
+            emit(Triple(change, lastNonCursorAt, cursorBatchStartedAt))
+        }
+    }
+    return observed.combine(fastMode.distinctUntilChanged()) { change, fast -> change to fast }
+        .transformLatest { (observedChange, fast) ->
+            val (change, nonCursorAt, cursorAt) = observedChange
+            if (change.sequence <= acknowledged.get()) return@transformLatest
+            val seenAt = if (change.lastNonCursor > acknowledged.get()) nonCursorAt else cursorAt
+            val interval = when {
+                !fast -> LEGACY_CHANGE_INTERVAL_MS
+                change.lastNonCursor > acknowledged.get() -> FAST_CHANGE_INTERVAL_MS
+                else -> CURSOR_CHANGE_INTERVAL_MS
+            }
+            delay((seenAt + interval - elapsed()).coerceAtLeast(0))
+            acknowledged.set(change.sequence)
+            emit(change.sequence to seenAt)
+        }
+}
 
 /** Keeps the independent debounce from racing a long Bluetooth merge or its completion callback. */
 internal class BluetoothCloudChangeGate {

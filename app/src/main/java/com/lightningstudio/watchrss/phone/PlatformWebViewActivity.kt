@@ -216,8 +216,9 @@ internal fun PlatformWebViewScreen(
 
     fun saveWebScrollProgress(force: Boolean) {
         val saver = onSaveScrollProgressState.value ?: return
-        if (!force && !webScrollCanSave) return
+        if (!webScrollCanSave) return
         val clamped = webScrollProgress.coerceIn(0f, 1f)
+        if (clamped == lastSavedScrollProgress) return
         val now = SystemClock.elapsedRealtime()
         if (!force) {
             val diff = abs(clamped - lastSavedScrollProgress)

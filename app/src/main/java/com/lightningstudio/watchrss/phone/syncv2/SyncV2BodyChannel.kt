@@ -85,27 +85,31 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
         return repository.refreshReferences(now(), projection.scope, localBluetoothScope(), life::check)
     }
     /** Random old placeholders with originals must be republished even without metadata edits. */
-    fun needsPublication():Boolean {
+    fun pendingPublications():Set<String> {
+        val pending = linkedSetOf<String>()
         val scope = localBluetoothScope()
         for((kind,id)in candidates())try {
             if (repository.pendingBluetooth(kind, id, scope)) continue
             val c=projection.candidate(kind,id)?:continue;val v=SyncV2Business.join(kind,c.first,c.second);if(v.optBoolean("deleted"))continue
             val original=repository.original(kind,id,v)?:continue
-            val entity=identity.entity(kind,id);val remote=projection.cloudRows(setOf(entity)).firstOrNull()?:return true
+            val entity=identity.entity(kind,id);val remote=projection.cloudRows(setOf(entity)).firstOrNull()
+            if (remote == null) { pending.add(entity); continue }
             val r=remote.getJSONObject("row");if(!r.isNull("recipeOid"))continue
             // A changed remote business binding requires the existing account-choice flow.
             if(SyncV2Codec.canonical(remote.getJSONObject("meta"))!=SyncV2Codec.canonical(c.first) || SyncV2Codec.canonical(remote.getJSONObject("state"))!=SyncV2Codec.canonical(c.second))continue
-            if(original.hasRegisteredDigest && r.optString("bodyRevision")!=SyncV2BodyCodec.revision(kind,entity,original.sha256))return true
+            if(original.hasRegisteredDigest && r.optString("bodyRevision")!=SyncV2BodyCodec.revision(kind,entity,original.sha256))pending.add(entity)
         } catch(e:Exception){if(e is CancellationException)throw e;life.check()}
-        return false
+        return pending
     }
     /** Before account publication, bind actual original bytes without creating P3 recipes. */
-    fun bindPrepared() {
+    fun bindPrepared(ids: Set<String>? = null) {
         val scope = localBluetoothScope()
         for((kind,id)in candidates())try {
+            val entity = identity.entity(kind, id)
+            if (ids != null && entity !in ids) continue
             if (repository.pendingBluetooth(kind, id, scope)) continue
             life.check();val c=projection.candidate(kind,id)?:continue;val v=SyncV2Business.join(kind,c.first,c.second);if(v.optBoolean("deleted"))continue
-            val entity=identity.entity(kind,id);val row=projection.wireContentRow(entity)?:continue;if(!row.isNull("recipeOid"))continue
+            val row=projection.wireContentRow(entity)?:continue;if(!row.isNull("recipeOid"))continue
             val original=repository.original(kind,id,v)?:continue
             val revision = SyncV2BodyCodec.revision(kind, entity, original.sha256)
             val previous = if (original.hasRegisteredDigest) null else projection.cloudRows(setOf(entity))
@@ -123,31 +127,35 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
         val globalRetry=File(root,"retry.json")
         if(globalRetry.isFile) {val r=SyncV2Wire.parse(globalRetry.readBytes(),4096,true)
             if(SyncV2Wire.uint(r,"until")>now())return Result(1,listOf(r.getString("code")))}
-        val anchor=anchor(account);var after="";var pending=0;val errors=linkedSetOf<String>()
+        val anchor=anchor(account);var pending=0;val errors=linkedSetOf<String>()
         var windowExpiry: Long? = null
-        while(true) {
-            val page=projection.cloudRowsPage(after,16);if(page.isEmpty())break
-            for(entry in page) {val m=entry.getJSONObject("meta");val row=entry.getJSONObject("row")
-                if(m.getString("kind") !in setOf("book","asset") || row.getBoolean("deleted") || !row.isNull("recipeOid") || row.isNull("bodyRevision"))continue
-                val b=binding(entry);val dir=File(root,"${b.entityKey}/${b.bodyRevision}")
-                try {
-                    val retry=File(dir,"retry.json");if(retry.isFile){val r=SyncV2Wire.parse(retry.readBytes(),4096,true);if(r.getLong("until")>now())throw SyncV2CloudError(r.getString("code"),true,r.getLong("until")-now())}
-                    val route=signals();if(route.internet!=true || !manual&&route.wifi!=true)SyncV2Codec.fail("network_unavailable")
-                    val expires = windowExpiry ?: captureWindow(anchor).also { windowExpiry = it }
-                    syncEntry(entry,anchor,expires,dir,downloadOnly)
-                }catch(e:Exception) {
-                    if (e is CancellationException) throw e
-                    life.check();pending++;val code=code(e);errors.add(code)
-                    val delay=(e as? SyncV2CloudError)?.retryAfterMillis
-                    if(delay!=null&&delay>0) {
-                        val retry=SyncV2Codec.utf8(SyncV2Codec.canonical(JSONObject().put("code",code).put("until",Math.addExact(now(),delay))))
-                        SyncV2BodyHttp.atomic(File(dir,"retry.json"),retry)
-                        SyncV2BodyHttp.atomic(globalRetry,retry)
-                        return Result(pending,errors.toList())
+        for (kind in listOf("asset", "book")) {
+            var after = ""
+            while(true) {
+                val page=projection.bodyCloudRowsPage(kind,after,16);if(page.isEmpty())break
+                for(entry in page) {val m=entry.getJSONObject("meta");val row=entry.getJSONObject("row")
+                    if(m.getString("kind") !in setOf("book","asset") || row.getBoolean("deleted") || !row.isNull("recipeOid") || row.isNull("bodyRevision"))continue
+                    val b=binding(entry);val dir=File(root,"${b.entityKey}/${b.bodyRevision}")
+                    try {
+                        val retry=File(dir,"retry.json");if(retry.isFile){val r=SyncV2Wire.parse(retry.readBytes(),4096,true);if(r.getLong("until")>now())throw SyncV2CloudError(r.getString("code"),true,r.getLong("until")-now())}
+                        val route=signals();if(route.internet!=true || !manual&&route.wifi!=true)SyncV2Codec.fail("network_unavailable")
+                        val expires = windowExpiry ?: captureWindow(anchor).also { windowExpiry = it }
+                        syncEntry(entry,anchor,expires,dir,downloadOnly)
+                    }catch(e:Exception) {
+                        if (e is CancellationException) throw e
+                        life.check();pending++;val code=code(e);errors.add(code)
+                        val delay=(e as? SyncV2CloudError)?.retryAfterMillis
+                        if(delay!=null&&delay>0) {
+                            val retry=SyncV2Codec.utf8(SyncV2Codec.canonical(JSONObject().put("code",code).put("until",Math.addExact(now(),delay))))
+                            SyncV2BodyHttp.atomic(File(dir,"retry.json"),retry)
+                            SyncV2BodyHttp.atomic(globalRetry,retry)
+
+        return Result(pending,errors.toList())
                     }
                 }
             }
             after=page.last().getJSONObject("row").getString("entityKey")
+        }
         }
         return Result(pending,errors.toList())
     }

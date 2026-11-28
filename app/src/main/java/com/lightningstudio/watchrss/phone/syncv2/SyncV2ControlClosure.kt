@@ -31,10 +31,15 @@ internal class SyncV2ControlClosure(private val identity: SyncV2Identity, privat
         .put("requiredFeatures",JSONArray()).put("payload",JSONObject()).put("noteSegments",JSONArray())
     fun verify(envelope:JSONObject,get:(String)->ByteArray,reference:(String)->JSONObject):Verified=verifyStaged(envelope,get,reference,null)
     /** F2/R4 pull entry: each segmented entity is handed to [stage] and dropped from the round. */
-    fun verifyStaged(envelope:JSONObject,get:(String)->ByteArray,reference:(String)->JSONObject,stage:((StagedRow)->Unit)?,objectsStore:(()->MutableMap<String,ByteArray>)?=null):Verified {
+    fun verifyStaged(envelope:JSONObject,get:(String)->ByteArray,reference:(String)->JSONObject,stage:((StagedRow)->Unit)?,objectsStore:(()->MutableMap<String,ByteArray>)?=null, delta: SyncV2Index.Delta? = null):Verified {
         val commit=authors.header(envelope);val objects=linkedMapOf<String,ByteArray>()
         fun fetch(oid:String):ByteArray = objects[oid] ?: get(oid).copyOf().also { objects[oid]=it }
-        val rows=SyncV2Index.read(identity.scope,commit.getString("treeRoot"),::fetch)
+        val root = commit.getString("treeRoot")
+        val rows = if (delta == null) SyncV2Index.read(identity.scope, root, ::fetch) else {
+            if (delta.edit.tree.root != root) SyncV2Codec.fail("hash_mismatch")
+            objects.putAll(delta.edit.tree.objects)
+            delta.changes.values.filterNotNull()
+        }
         val decoded=mutableListOf<JSONObject>()
         for(row in rows) {
             val entity=row.getString("entityKey")

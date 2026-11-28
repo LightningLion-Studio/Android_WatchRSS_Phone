@@ -26,13 +26,20 @@ internal class SyncV2AccountCatalog(private val db:SupportSQLiteDatabase,private
         roots["differences"]=tree("differences").set(roots["differences"],entity,if(needed)""else null)
     }
     fun digest(record:JSONObject)=SyncV2Codec.hash(JSONObject().put("meta",record.getJSONObject("meta")).put("state",record.getJSONObject("state")))
-    fun put(side:String,record:JSONObject) {
+    fun put(side:String,record:JSONObject, rowHash:String? = null, refsOid:String? = null) {
         check(db.inTransaction());check(side in setOf("candidate","cloud","binding"))
         val meta=record.getJSONObject("meta");val entity=meta.getString("entityKey");val kind=meta.getString("kind")
-        val value=entry(entity)?:JSONObject().put("entityKey",entity).put("kind",kind).put("candidate",JSONObject.NULL).put("cloud",JSONObject.NULL).put("binding",JSONObject.NULL).put("rowHash",JSONObject.NULL).put("refs",JSONObject.NULL)
+        val prior = entry(entity)
+        val value=prior?:JSONObject().put("entityKey",entity).put("kind",kind).put("candidate",JSONObject.NULL).put("cloud",JSONObject.NULL).put("binding",JSONObject.NULL).put("rowHash",JSONObject.NULL).put("refs",JSONObject.NULL)
         if(value.getString("kind")!=kind)SyncV2Codec.fail("identity_conflict")
         val hash=if(record.getJSONObject("state").optBoolean("projectionRemoved"))null else digest(record)
+        val changed = prior == null || value.get(side) != (hash ?: JSONObject.NULL)
+        val rowChanged = rowHash != null &&
+            (value.get("rowHash") != rowHash || value.get("refs") != (refsOid ?: JSONObject.NULL))
+        if (!changed && !rowChanged) return
+        if (rowHash != null) value.put("rowHash", rowHash).put("refs", refsOid ?: JSONObject.NULL)
         value.put(side,hash?:JSONObject.NULL);persist(value)
+        if (!changed) return
         if(kind in setOf("rss-state","source") && side!="binding")roots["$side/$kind"]=tree("$side/$kind").set(roots["$side/$kind"],entity,hash)
         if(kind=="note" && hash!=null && side!="binding") {
             val conflicts=SyncV2NoteConflicts.read(record.getJSONObject("state"),meta.getString("logicalId"),entity)
@@ -111,13 +118,10 @@ internal class SyncV2AccountCatalog(private val db:SupportSQLiteDatabase,private
         body.put("p5HeaderCacheDigest",SyncV2Codec.hash(org.json.JSONArray(retained.values.toList())))
     }
     fun cloudRowHash(entity:String)=entry(entity)?.optString("rowHash")?.takeIf{it.isNotEmpty()&&it!="null"}
-    fun setCloudRow(record:JSONObject,refsOid:String?) {
-        check(db.inTransaction());val entity=record.getJSONObject("meta").getString("entityKey")
-        put("cloud",record);val value=entry(entity)?:SyncV2Codec.fail("closure_incomplete")
-        persist(value.put("rowHash",SyncV2Codec.hash(record)).put("refs",refsOid?:JSONObject.NULL))
-    }
+    fun setCloudRow(record: JSONObject, refsOid: String?) =
+        put("cloud", record, SyncV2Codec.hash(record), refsOid)
     fun refs(parent:String)=db.controlQuery("SELECT body FROM syncv2_p5_ref_index WHERE scope=? AND parent_oid=?",arrayOf(scope,parent)).use{c->if(!c.moveToFirst())null else {
         if(c.isNull(0))SyncV2Codec.fail("closure_incomplete");val value=open("refs-map",c.getBlob(0));if(value.getString("parent")!=parent)SyncV2Codec.fail("identity_conflict");value.getString("oid")
     }}
-    fun putRefs(parent:String,oid:String){check(db.inTransaction());db.execSQL("INSERT OR REPLACE INTO syncv2_p5_ref_index VALUES(?,?,?,?)",arrayOf(scope,parent,oid,seal("refs-map",JSONObject().put("parent",parent).put("oid",oid))))}
+    fun putRefs(parent:String,oid:String){check(db.inTransaction());if(refs(parent)==oid)return;db.execSQL("INSERT OR REPLACE INTO syncv2_p5_ref_index VALUES(?,?,?,?)",arrayOf(scope,parent,oid,seal("refs-map",JSONObject().put("parent",parent).put("oid",oid))))}
 }

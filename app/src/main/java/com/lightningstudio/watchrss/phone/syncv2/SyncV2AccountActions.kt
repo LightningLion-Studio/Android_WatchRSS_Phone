@@ -108,12 +108,13 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
     fun refresh(
         maxPages: Int = 16,
         budgetMillis: Long = 290_000,
+        published: SyncV2CloudSync.PublishedDelta? = null,
         beforeApply: (String) -> Unit = {}
     ): JSONObject {
         gate()
         require(maxPages in 1..4096 && budgetMillis in 1..290_000)
         syncFiles()
-        val read=cloud.readCurrentResult()
+        val read=cloud.readCurrentResult(published)
         beforeApply(read.status)
         val before=projection.state()
         val unchanged=read.reused && projection.isUnchangedAccount(before)
@@ -147,8 +148,16 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             !ownPublished && (st.body.optBoolean("unknownEditBase") || st.revision!=st.body.optString("acknowledgedLocalRevision","0")))return false
         if(same(st.body.optJSONObject("appliedAccount"),a))return false
         if(!same(st.body.optJSONObject("metadataAccount"),a))SyncV2Codec.fail("closure_incomplete")
-        val before=projection.accountLocalRows()
-        val target=business.effective(before,cloudRows(),st.body.optJSONObject("appliedAccount")?.optString("generation")?.let{it!=a.getString("generation")}?:false)
+        val metadataIds = st.body.optJSONArray("metadataDeltaIds")
+        val applied = st.body.optJSONObject("appliedAccount")
+        val sparseIds = if (metadataIds != null && applied?.optString("oid") == st.body.optString("metadataDeltaBase")) {
+            val ids = SyncV2Wire.strings(metadataIds, 64, false).toSet() +
+                if (ownPublished) projection.publicationIds() else emptySet()
+            ids.takeIf { it.size <= 64 && projection.canApplySparse(it) }
+        } else null
+        val before=projection.accountLocalRows(sparseIds)
+        val remote = cloudRows(sparseIds).let { if (sparseIds != null && sparseIds.size <= 4) it.toList() else it }
+        val target=business.effective(before,remote,st.body.optJSONObject("appliedAccount")?.optString("generation")?.let{it!=a.getString("generation")}?:false)
         business.validate(target)
         val endangered=endangeredBodies(before,target)
         if(endangered.isNotEmpty()) {
@@ -157,7 +166,7 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
         }
         fileGuard(fileToken){ projection.accountWriter(st.version){current->
             val rss=business.apply(before,target);fault("business-applied")
-            projection.accountApplied(current,a,target,id(),before,rss)
+            projection.accountApplied(current,a,target,id(),before,rss,sparseIds=sparseIds)
             if(signing!=null)current.body.put("pendingAppliedAck",JSONObject().put("requestId",id()).put("commitOid",a.getString("oid")).put("deviceId",signer.deviceId).put("refRevision",a.getString("revision")).put("rollbackGeneration",a.getString("generation")))
         }
         }

@@ -43,11 +43,18 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         return SigningKeys(response,fingerprint)
     }
 
+    internal data class PublishedDelta(
+        val commitOid: String,
+        val baseRoot: String,
+        val delta: SyncV2Index.Delta,
+        val objects: Map<String, ByteArray>
+    )
+
     internal data class ReadResult(val status:String,val reused:Boolean,val serverRevision:String)
 
     fun readCurrent():String = readCurrentResult().status
 
-    internal fun readCurrentResult():ReadResult {
+    internal fun readCurrentResult(published: PublishedDelta? = null):ReadResult {
         capabilities() // Every error, including busy, ends this round. No catch-and-continue.
         // Use the authenticated checkpoint's own fixed window. A later negotiate may legitimately race it.
         val window=client.checkpoint(now()).getJSONObject("body");fresh(window);val id=window.getString("windowId")
@@ -93,22 +100,49 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
             if(next!=at || page.get("complete")!=(at==pin))SyncV2Codec.fail("ref_continuity_unavailable")
         }
         val closure=SyncV2ControlClosure(identity,authors,contentKey,noteSegmentsRead)
-        val verified=projection.verifyCloud(closure,headers.first(),{oid->client.raw(oid,id)},{ parent ->
-            client.reference(parent,id).let { JSONObject(it.toString()).apply { remove("version") } }
-        },SyncV2ControlFetch.Remote({oids->client.batch(id,oids)}){parents->
-            client.references(parents,id).mapValues{(_,v)->v?.let{JSONObject(it.toString()).apply{remove("version")}}}
-        })
-        verified.use {
-        fresh(window)
-        projection.installCloudIndex(observation,headers,verified,authors::header,serverRevision,readHeader={ oid ->
+        fun readHeader(oid: String): JSONObject {
             // Permanent signed headers remain available after historical content has expired.
             val page=client.ancestry(oid,null);val values=page.getJSONArray("headers")
             if(page.getString("head")!=oid || !page.isNull("stop") || values.length() !in 1..64)SyncV2Codec.fail("ref_continuity_unavailable")
             val first=values.getJSONObject(0);SyncV2Codec.exact(first,setOf("commitOid","headerOid","body","signature"))
             val envelope=JSONObject().put("body",first.getJSONObject("body")).put("signature",first.getString("signature"))
             if(first.getString("commitOid")!=oid || SyncV2Codec.oid("commit-header",envelope)!=first.getString("headerOid"))SyncV2Codec.fail("hash_mismatch")
-            fresh(window);envelope
-        },signingFingerprint=signing.fingerprint,noteSegmentsRead=noteSegmentsRead)
+            fresh(window)
+            return envelope
+        }
+        val localPublication = published?.takeIf { it.commitOid == head }
+        fun readObject(oid: String): ByteArray = localPublication?.objects?.get(oid)
+            ?: if (projection.cloudObjectExists(oid)) projection.accountObject(oid) else client.raw(oid,id)
+        fun readReference(parent: String): JSONObject = client.reference(parent,id).let {
+            JSONObject(it.toString()).apply { remove("version") }
+        }
+        val base = projection.state()
+        val signed = authors.header(headers.first())
+        val oldRoot = projection.sparseReadRoot(base, signed, observation.getString("generation"), signing.fingerprint, noteSegmentsRead)
+        val delta = oldRoot?.let {
+            localPublication?.takeIf { publication ->
+                publication.baseRoot == it && publication.delta.edit.tree.root == signed.getString("treeRoot")
+            }?.delta ?: SyncV2Index.delta(identity.scope, it, signed.getString("treeRoot"), projection::accountObject, ::readObject)
+        }
+        if (delta != null) {
+            closure.verifyStaged(headers.first(), ::readObject, ::readReference, null, delta = delta).use { verified ->
+                // Newly isolated notes need the full install path to preserve pending local edits.
+                if (verified.rows.none { it.has(SyncV2NoteWiring.ISOLATED_KEY) }) {
+                    fresh(window)
+                    projection.installCloudDelta(observation, headers, base, delta, verified, authors::header,
+                        serverRevision, signing.fingerprint, noteSegmentsRead, ::readHeader)
+                    return result(false)
+                }
+            }
+        }
+        val verified=projection.verifyCloud(closure,headers.first(),{oid->client.raw(oid,id)},::readReference,
+            SyncV2ControlFetch.Remote({oids->client.batch(id,oids)}){parents->
+                client.references(parents,id).mapValues{(_,v)->v?.let{JSONObject(it.toString()).apply{remove("version")}}}
+            })
+        verified.use {
+            fresh(window)
+            projection.installCloudIndex(observation,headers,verified,authors::header,serverRevision,
+                readHeader=::readHeader,signingFingerprint=signing.fingerprint,noteSegmentsRead=noteSegmentsRead)
         }
         return result(false)
     }
@@ -145,8 +179,10 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
     }
     /** P2 normal publication only. Rollback/choice/history write paths remain closed. */
     fun publishIndex(signer:SyncV2Signing,contentKey:ByteArray,keyVersion:Long,scannedRevision:String?=null,
-        resetAdditions:Boolean=false):JSONObject {
-        resumePublish()?.let{return it}
+        resetAdditions:Boolean=false, extraIds:Set<String> = emptySet(),
+        prepareContent: ((Set<String>?) -> Boolean)? = null,
+        observePublished: ((PublishedDelta?) -> Unit)? = null):JSONObject {
+        resumePublish()?.let { observePublished?.invoke(null); return it }
         fun sourceCurrent() {
             if(scannedRevision!=null && (projection.state().revision!=scannedRevision || !projection.isWindowComplete()))SyncV2Codec.fail("source_changed")
         }
@@ -167,25 +203,40 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         val account=window.getJSONObject("account");val accepted=st.body.optJSONObject("account")
         if(!account.isNull("commitOid") && (accepted==null || accepted.getString("oid")!=account.getString("commitOid") || accepted.getString("generation")!=account.getString("rollbackGeneration")))throw SyncV2CloudError("ref_conflict",true)
         if(!account.isNull("commitOid") && st.body.optJSONObject("metadataAccount")?.optString("oid")!=account.getString("commitOid"))SyncV2Codec.fail("closure_incomplete")
-        val localIndex=projection.prepareWireIndex(signer,contentKey,keyVersion,resetAdditions)
+        val sparseRoot = if (resetAdditions) null else projection.sparsePublicationRoot(st)
+        val ids = if (sparseRoot == null) null else
+            (projection.publicationIds() + projection.publicationMergeIds() + extraIds).takeIf { it.size <= 64 }
+        val localIndex = projection.prepareWireIndex(signer, contentKey, keyVersion, resetAdditions, ids)
         try {
-        // Without an authenticated operation base, a differing local row cannot overwrite a cloud row.
-        // Missing local rows are retained from cloud, never interpreted as deletions.
-        val mergedRows=SyncV2Index.read(identity.scope,localIndex.tree.root,localIndex.objects::getValue).associateBy{it.getString("entityKey")}.toMutableMap()
-        // A1: one OID has one byte sequence. Do not read and write an object that is already staged.
-        val cloudObjects=projection.cloudObjects()
-        val mergedObjects=projection.objectSpool().apply{putAll(cloudObjects);for(oid in localIndex.objects.keys)if(!containsKey(oid))put(oid,localIndex.objects.getValue(oid))}
-        try {
+        val preparedBodies = if (prepareContent?.invoke(ids) == true) {
+            sourceCurrent()
+            projection.wirePublicationIds()
+        } else emptySet()
+        // The body workers change row references only. The first preparation's sealed
+        // metadata and state remain valid and are reused for the final tree.
+        val mergedRows = localIndex.proposedRows.associate { row ->
+            val key = row.getString("entityKey")
+            val prepared = if (key in preparedBodies && !row.getBoolean("deleted")) projection.wireContentRow(key) else null
+            key to if (prepared != null && listOf("metaOid", "stateOid").all { prepared.get(it) == row.get(it) } &&
+                SyncV2Codec.d64(prepared.getString("rowSequence")) > SyncV2Codec.d64(row.getString("rowSequence"))) {
+                prepared
+            } else row
+        }.toMutableMap()
+        val previousWire = mutableMapOf<String, JSONObject>()
+        val cloudObjects = if (ids == null) projection.cloudObjects() else emptyMap()
+        val mergedObjects = objectOverlay(cloudObjects, localIndex.objects)
         val newRefs=localIndex.refs.toMutableList()
-        for(cloud in projection.cloudRows()) {
+        for(cloud in projection.cloudRows(ids)) {
             val meta=cloud.getJSONObject("meta");val entity=meta.getString("entityKey")
+            val row = cloud.getJSONObject("row")
+            if (ids != null) previousWire[entity] = row
             if(cloud.has(SyncV2NoteWiring.ISOLATED_KEY)) {
                 // F1/R3: an isolated row is already the authenticated verbatim row; the normal
                 // publish keeps it untouched and never interprets the local candidate against it.
                 mergedRows[entity]=cloud.getJSONObject("row")
                 continue
             }
-            val remoteState=cloud.getJSONObject("state");val row=cloud.getJSONObject("row")
+            val remoteState=cloud.getJSONObject("state")
             if (resetAdditions && meta.getString("kind") != "note" && entity in mergedRows) {
                 // The planned wire row already merges this candidate with this authenticated head.
                 continue
@@ -225,32 +276,31 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
                 listOf("metaOid","stateOid").all{ready.get(it)==row.get(it)} && SyncV2Codec.d64(ready.getString("rowSequence"))>SyncV2Codec.d64(row.getString("rowSequence"))
             mergedRows[entity]=if(bindsIndependent || fulfillsPromise || preservesConflictFacts || localEdit)ready?:SyncV2Codec.fail("closure_incomplete")else row
         }
-        val tree=SyncV2Index.build(identity.scope,mergedRows.values.toList());mergedObjects.putAll(tree.objects)
+        val edit = if (ids == null) null
+            else SyncV2Index.edit(identity.scope, requireNotNull(sparseRoot), mergedRows, projection::accountObject)
+        val tree = edit?.tree ?: SyncV2Index.build(identity.scope, mergedRows.values.toList())
+        val newObjects = objectOverlay(localIndex.objects, tree.objects)
+        val available = objectOverlay(mergedObjects, tree.objects)
         val reachable=mutableSetOf<String>();reachable.addAll(tree.objects.keys)
         for(row in mergedRows.values){reachable.add(row.getString("metaOid"));reachable.add(row.getString("stateOid"))}
-        // A segmented parent's sealed children are reachable only through its refs table: the
-        // closure walk carries child refs and child bytes (25.4/25.7), iterating to a fixpoint.
-        var carry=true
-        while(carry) {
-            carry=false
-            for(ref in newRefs)if(ref.getJSONObject("body").getString("stateOid") in reachable) {
-                if(reachable.add(SyncV2Codec.oid("state-refs",ref))) {
-                    val children=ref.getJSONObject("body").getJSONArray("segmentOids")
-                    for(i in 0 until children.length())reachable.add(children.getString(i))
-                    carry=true
-                }
-            }
-            for((oid,bytes)in mergedObjects)if(oid.startsWith("state-refs:")&&oid !in reachable) {
-                val ref=SyncV2Wire.parse(bytes,262144,true)
-                if(ref.getJSONObject("body").getString("stateOid") in reachable) {
-                    reachable.add(oid)
-                    val children=ref.getJSONObject("body").getJSONArray("segmentOids")
-                    for(i in 0 until children.length())reachable.add(children.getString(i))
-                    carry=true
+        // New child refs and ciphertext are reachable through their registered parent state.
+        val refCandidates = if (ids == null) available else newObjects
+        val refsByState = refCandidates.keys.filter { it.startsWith("state-refs:") }.map { oid ->
+            oid to SyncV2Wire.parse(refCandidates.getValue(oid),262144,true).getJSONObject("body")
+        }.groupBy { it.second.getString("stateOid") }
+        val states = ArrayDeque(reachable.filter { it.startsWith("state:") })
+        while (states.isNotEmpty()) {
+            for ((oid, body) in refsByState[states.removeFirst()].orEmpty()) {
+                if (!reachable.add(oid)) continue
+                val children = body.getJSONArray("segmentOids")
+                for (i in 0 until children.length()) {
+                    val child = children.getString(i)
+                    if (reachable.add(child)) states.addLast(child)
                 }
             }
         }
-        val index=SyncV2Projection.WireIndex(tree,mergedObjects.selectObjects{it in reachable},newRefs.filter{it.getJSONObject("body").getString("stateOid") in reachable})
+        val uploadObjects = newObjects.selectObjects { it in reachable }
+        val reachableRefs = newRefs.filter { it.getJSONObject("body").getString("stateOid") in reachable }
         val refs=window.getJSONArray("refs");var own:String?=null;var revision="0"
         for(i in 0 until refs.length()) {val ref=refs.getJSONObject(i);if(ref.getString("deviceId")==signer.deviceId) {own=ref.getString("commitOid");revision=ref.getString("refRevision")}}
         val ownSequence=if(own==null)"0" else {
@@ -260,14 +310,18 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         }
         val body=JSONObject().put("version",2).put("scope",identity.scope).put("authorDeviceId",signer.deviceId)
             .put("deviceSequence",projection.reserveDeviceSequence(ownSequence)).put("previousOwnCommit",own?:JSONObject.NULL).put("mergedParents",JSONArray())
-            .put("treeRoot",index.tree.root).put("requiredFeatures",JSONArray()).put("createdAtMillis",now()).put("observedRefs",JSONArray())
+            .put("treeRoot",tree.root).put("requiredFeatures",JSONArray()).put("createdAtMillis",now()).put("observedRefs",JSONArray())
             .put("indexComplete",true).put("accountParent",account.get("commitOid")).put("rollbackGeneration",account.getString("rollbackGeneration"))
             .put("operation",JSONObject().put("kind","normal").put("rollbackTarget",JSONObject.NULL).put("resolvesGeneration",JSONObject.NULL))
         val signed=signer.commit(body);val oid=SyncV2Codec.oid("commit",body)
-        val objects=mergedObjects;objects.retain(reachable);objects[oid]=SyncV2Codec.utf8(SyncV2Codec.canonical(signed))
+        val objects = objectOverlay(uploadObjects, mapOf(oid to SyncV2Codec.utf8(SyncV2Codec.canonical(signed))))
         // Each reservation is bounded. Control upload never requests a content slot.
-        val currentOids=cloudObjects.keys
-        val toUpload=objects.entries.filter{it.key !in currentOids && it.key.substringBefore(':') in setOf("meta","state","tree","commit")}.sortedBy{it.key}
+        val toUpload = objects.keys.filter {
+            it.substringBefore(':') in setOf("meta","state","tree","commit") && !projection.cloudObjectExists(it)
+        }.sorted().map { key -> object: Map.Entry<String, ByteArray> {
+            override val key = key
+            override val value get() = objects.getValue(key)
+        } }
         for(batch in toUpload.chunked(64)) {
             val reserve=client.reserve(randomId(),batch.map{it.key to it.value.size});val reservation=reserve.getString("reservationId")
             // C11 also applies to control objects: only a current authenticated status
@@ -289,7 +343,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
                 client.verifyReceipt(complete.getJSONObject("receipt"),item.key,item.value.size.toLong(),item.value.size.toLong(),now())
             }
         }
-        for(ref in index.refs)if(SyncV2Codec.oid("state-refs",ref) !in currentOids)client.stateRefs(ref)
+        for(ref in reachableRefs)if(!projection.cloudObjectExists(SyncV2Codec.oid("state-refs",ref)))client.stateRefs(ref)
         fresh(window)
         val publishState=projection.state()
         if(publishState.revision!=st.revision)SyncV2Codec.fail("choice_stale")
@@ -297,8 +351,18 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         val request=JSONObject().put("account",SyncV2CloudClient.refUpdate(signer,identity.scope,"refs/account/current",old,account.getString("revision"),oid,id,now()))
             .put("device",SyncV2CloudClient.refUpdate(signer,identity.scope,"refs/devices/${signer.deviceId}/index",own,revision,oid,id,now())).put("relayGrant",JSONObject.NULL)
         projection.persistPublish(request,publishState.version)
-        val response=publishAttempt(request);projection.confirmPublish(request,response);return response
-        } finally {mergedObjects.close()}
+        val response = publishAttempt(request)
+        projection.confirmPublish(request,response)
+        if (observePublished != null) {
+            val delta = edit?.let {
+                val changes = mergedRows.filter { (entity, row) ->
+                    SyncV2Codec.canonical(row) != SyncV2Codec.canonical(previousWire[entity])
+                }
+                PublishedDelta(oid, requireNotNull(sparseRoot), SyncV2Index.Delta(changes, it), objects)
+            }
+            observePublished(delta)
+        }
+        return response
         } finally {localIndex.close()}
     }
     private fun randomId()=SyncV2Codec.hex(SyncV2Codec.random(16))

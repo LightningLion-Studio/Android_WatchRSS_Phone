@@ -52,7 +52,10 @@ internal class SyncV2AccountSparseMetadata(private val projection:SyncV2Projecti
                 db.execSQL("DELETE FROM syncv2_cloud_rows WHERE scope=? AND entity_key=?",arrayOf(scope,id));catalog.remove("cloud",id)
             }else {
                 val normalized=JSONObject(next.toString()).apply{for(key in listOf("value","wire","p5Base","localValue"))remove(key)}
-                if(catalog.cloudRowHash(id)!=SyncV2Codec.hash(normalized))db.execSQL("INSERT OR REPLACE INTO syncv2_cloud_rows VALUES(?,?,?)",arrayOf(scope,id,projection.accountCacheRow(normalized)))
+                if (catalog.cloudRowHash(id) != SyncV2Codec.hash(normalized)) {
+                    projection.cloudRowWritten()
+                    db.execSQL("INSERT OR REPLACE INTO syncv2_cloud_rows VALUES(?,?,?)",arrayOf(scope,id,projection.accountCacheRow(normalized)))
+                }
                 if(normalized.has(SyncV2NoteWiring.ISOLATED_KEY))catalog.remove("cloud",id)
                 else catalog.setCloudRow(normalized,catalog.refs(next.getJSONObject("row").getString("stateOid")))
             }
@@ -66,7 +69,12 @@ internal class SyncV2AccountSparseMetadata(private val projection:SyncV2Projecti
                 .put("stateOid",row.getJSONObject("row").getString("stateOid")).put("noteRevision",row.opt(SyncV2NoteWiring.REVISION_KEY)?:JSONObject.NULL))
         }
         st.body.put("noteIsolation",isolation)
-        SyncV2NoteWiring.observeBindings(db,scope,rows)
+        SyncV2NoteWiring.observeBindings(db,scope,rows) { received ->
+            val meta = received.getJSONObject("meta")
+            val candidate = projection.candidate(meta.getString("kind"), meta.getString("logicalId"))
+            candidate != null && (SyncV2Codec.canonical(candidate.first) != SyncV2Codec.canonical(meta) ||
+                SyncV2Codec.canonical(candidate.second) != SyncV2Codec.canonical(received.getJSONObject("state")))
+        }
         // The legacy cloud-row envelope purpose stays the same; projection owns it.
         for((oid,bytes)in objects)if(oid.substringBefore(':') in setOf("meta","state","tree","state-refs"))
             db.execSQL("INSERT OR IGNORE INTO syncv2_cloud_objects VALUES(?,?,?)",arrayOf(scope,oid,bytes))

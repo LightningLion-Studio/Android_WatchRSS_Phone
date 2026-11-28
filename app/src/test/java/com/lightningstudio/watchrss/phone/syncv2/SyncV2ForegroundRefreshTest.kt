@@ -38,6 +38,33 @@ class SyncV2ForegroundRefreshTest {
         }
     }
 
+    @Test fun restartReusesPersistedBodyWatermark() {
+        SyncV2P5Fixture().use { w ->
+            withRuntime(w) { runtime -> assertFalse(runtime.round()) }
+            w.reopen()
+            withRuntime(w) { runtime ->
+                w.requests.clear()
+                assertTrue(runtime.round())
+                assertEquals(probeRoutes, w.requests)
+            }
+        }
+    }
+
+    @Test fun assetReferenceIndexFollowsNoteEditsAndRetainsBaseReferences() {
+        SyncV2P5Fixture().use { w ->
+            w.start()
+            w.sql.execSQL("UPDATE notes SET markdown='![live](assets/live.png)', baseMarkdown='![base](assets/base.png)' WHERE noteId='note'")
+            assertEquals(setOf("live.png", "base.png"), SyncV2NoteAssetReferences.keys(w.sql))
+            assertEquals(setOf("note:note"), SyncV2NoteAssetReferences.owners(w.sql, "live.png"))
+
+            w.sql.execSQL("UPDATE notes SET markdown='![new](assets/new.png)' WHERE noteId='note'")
+            assertEquals(setOf("new.png", "base.png"), SyncV2NoteAssetReferences.keys(w.sql))
+            assertTrue(SyncV2NoteAssetReferences.owners(w.sql, "live.png").isEmpty())
+            w.sql.execSQL("UPDATE notes SET deleted=1 WHERE noteId='note'")
+            assertTrue(SyncV2NoteAssetReferences.keys(w.sql).isEmpty())
+        }
+    }
+
     @Test fun revocationAdvanceReverifiesEvenWithSameHeadAndRollbackFailsAfterRestart() {
         SyncV2P5Fixture().use { w ->
             w.start()
@@ -88,7 +115,8 @@ class SyncV2ForegroundRefreshTest {
                 }
 
                 assertFalse(runtime.round())
-                assertTrue(writes.contains("before-checkpoint"))
+                assertEquals(1, writes.count { it == "dirty-key-projected" })
+                assertFalse(writes.contains("before-checkpoint"))
                 assertEquals(1,w.publishCalls)
                 assertFalse(w.requests.contains("account/ancestry") &&
                     w.requests.indexOf("account/ancestry")<w.requests.indexOf("account/publish"))

@@ -21,7 +21,9 @@ internal object SyncV2BusinessWitness {
     }.getOrNull()
     private fun exists(db:SupportSQLiteDatabase,table:String)=db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",arrayOf(table)).use{it.moveToFirst()}
     private fun raw(db:SupportSQLiteDatabase):Stamp? {
-        if(!exists(db,"cloud_local_change_identity") || !exists(db,"sqlite_sequence"))return null
+        if (!exists(db, "cloud_local_change_identity") || !exists(db, "sqlite_sequence") ||
+            !exists(db, "cloud_local_dirty") || !exists(db, "cloud_local_dirty_floor") ||
+            !exists(db, "note_asset_ref_dirty")) return null
         val id=db.query("SELECT identity FROM cloud_local_change_identity WHERE id=1").use{if(it.moveToFirst())it.getString(0)else null}?:return null
         val seq=db.query("SELECT seq FROM sqlite_sequence WHERE name='cloud_local_change_counter'").use{if(it.moveToFirst())it.getLong(0)else null}?:return null
         if(seq<0)return null

@@ -78,16 +78,71 @@ class SyncV2P5IncrementalResourceTest {
         println("P5R_LARGE entities=$count objects=${puts.size} bytes=$bytes stagedRows=$stagedRows businessUpdates=${updates["business"]?:0}")
         emit("incremental-12500.json",evidence)
     }}
+    @Test fun oneEditPublishesAndFollowsOnlyChangedRows() {
+        val work = mutableListOf<String>()
+        SyncV2P5Fixture(projectionFault = work::add).use { w ->
+            val all = folders(320)
+            val base = w.commit(all, w.initial, "0", "normal", null)
+            w.setCurrent(base, "3")
+            val actions = w.actions()
+            actions.refresh()
+            w.drain()
+            assertEquals(base, w.projection.state().body.getJSONObject("appliedAccount").getString("oid"))
+            val baselineCloudWrites = work.count { it == "cloud-row-written" }
+            assertEquals(320, baselineCloudWrites)
+            work.clear()
+
+            w.sql.execSQL("UPDATE note_folders SET name='local edit' WHERE folderId='folder-00000'")
+            assertFalse(w.projection.runWindow().paused)
+            val cloud = SyncV2CloudSync(w.f.client(), w.identity, w.projection, { it == "synthetic-phone" }, { w.key }, { w.f.now })
+            var usedLocalDelta = false
+            cloud.publishIndex(w.f.signer, w.key, 1, w.projection.state().revision, observePublished = {
+                usedLocalDelta = it != null
+                actions.refresh(published = it)
+            })
+            assertTrue(usedLocalDelta)
+            assertEquals(1, work.count { it == "dirty-key-projected" })
+            assertEquals(1, work.count { it == "cloud-row-written" })
+            val localReads = work.count { it == "cloud-row-opened" }
+            val spool = work.count { it == "wire-spool-write" }
+            assertTrue("cloud row opens: $localReads", localReads in 1..12)
+            assertTrue("spool writes: $spool", spool in 1..6)
+            val published = w.current.getString("commitOid")
+            assertEquals(published, w.projection.state().body.getJSONObject("appliedAccount").getString("oid"))
+            val root = w.headers.getValue(published).getJSONObject("body").getString("treeRoot")
+            val wire = SyncV2Index.read(w.identity.scope, root, w.f.objects::getValue)
+            val changed = w.identity.entity("folder", "folder-00001")
+            val unchanged = wire.associateBy { it.getString("entityKey") } - changed
+            work.clear()
+            w.requests.clear()
+
+            val remote = w.commit(all.map { value ->
+                if (value.getString("folderId") == "folder-00001") JSONObject(value.toString()).put("name", "remote edit")
+                else value
+            }, published, "0", "normal", null, reuseRows = unchanged)
+            w.setCurrent(remote, SyncV2Codec.next(w.current.getString("revision")))
+            actions.refresh()
+            assertEquals(remote, w.projection.state().body.getJSONObject("appliedAccount").getString("oid"))
+            assertEquals(1, work.count { it == "cloud-row-written" })
+            assertEquals(0, work.count { it == "dirty-key-projected" })
+            assertTrue(w.requests.count { it.startsWith("objects/tree:") } in 1..3)
+            assertEquals(1, w.requests.count { it.startsWith("objects/meta:") })
+            assertEquals(1, w.requests.count { it.startsWith("objects/state:") })
+            println("normal index: initialCloudWrites=$baselineCloudWrites localCloudOpens=$localReads " +
+                "localWireSpoolWrites=$spool remoteCloudWrites=1")
+        }
+    }
+
     @Test fun singlePageWindowsResumePastCompletedDomainsAndSurviveRestart():Unit=SyncV2P5Fixture().use{w->
         val all=folders(257);val oid=w.commit(listOf(w.note())+all,w.initial,"0","normal",null);w.setCurrent(oid,"3")
         install(w);w.drain();assertTrue(w.actions().applyObserved());w.drain()
-        w.sql.execSQL("UPDATE note_folders SET name='changed' WHERE folderId='folder-00256'")
+        w.sql.execSQL("UPDATE note_folders SET name='changed' WHERE folderId>='folder-00192'")
         var complete=false;var windows=0;var restarts=0;var rows=0;val checkpoints=JSONArray()
         while(!complete && windows<32) {
             val result=w.projection.runWindow(maxPages=1);windows++;rows+=result.rows;assertTrue(result.pages<=1)
             checkpoints.put(w.sql.query("SELECT page_key FROM syncv2_scan WHERE domain='note_folders'").use{if(it.moveToFirst())it.getString(0)else""})
             complete=!result.paused
-            if(!complete && windows%3==0){w.reopen();restarts++}
+            if(!complete && windows==1){w.reopen();restarts++}
         }
         assertTrue("bounded windows must advance",complete);assertTrue(restarts>0)
         val entity=w.projection.candidate("folder","folder-00256")!!;assertEquals("changed",SyncV2Business.join("folder",entity.first,entity.second).getString("name"))

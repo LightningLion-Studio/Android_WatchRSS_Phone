@@ -6,7 +6,7 @@ import org.json.JSONObject
 /** Disk staging for a control round. Only keys and lengths survive across entities.
  * Values are sealed wire objects or locally encrypted rows. No cleartext enters the spool.
  * The owner closes the spool on success and failure, including before exposing an ACK. */
-internal class SyncV2Spool(db: SupportSQLiteDatabase) : AbstractMutableMap<String, ByteArray>(), AutoCloseable {
+internal class SyncV2Spool(db: SupportSQLiteDatabase, private val afterWrite: () -> Unit = {}) : AbstractMutableMap<String, ByteArray>(), AutoCloseable {
     private val directory = try{java.nio.file.Files.createTempDirectory(
         syncV2SpoolDirectory(db).toPath(), "syncv2-spool-").toFile()}catch(e:java.io.IOException){SyncV2Codec.fail("storage_pressure")}.also {
         it.setReadable(false,false);it.setWritable(false,false);it.setExecutable(false,false)
@@ -25,6 +25,7 @@ internal class SyncV2Spool(db: SupportSQLiteDatabase) : AbstractMutableMap<Strin
         val file=paths.getOrPut(key){java.io.File(directory,(nextFile++).toString())}
         try {file.writeBytes(value)}catch(e:java.io.IOException){SyncV2Codec.fail("storage_pressure")}
         lengths[key] = value.size
+        afterWrite()
         return null
     }
     override fun remove(key: String): ByteArray? {

@@ -30,6 +30,15 @@ internal class CloudLocalChanges(private val database:PhoneCompanionDatabase) {
     }
     fun observeSequence():Flow<Long> = database.invalidationTracker.createFlow(*CLOUD_CHANGE_TABLES.toTypedArray())
         .map { sequence() }.distinctUntilChanged().flowOn(Dispatchers.IO)
+    fun observeSchedulingSequence(): Flow<CloudSchedulingSequence> =
+        database.invalidationTracker.createFlow(*CLOUD_CHANGE_TABLES.toTypedArray()).map {
+            schemaIdentity()
+            db.query("""SELECT seq, (SELECT seq FROM cloud_local_non_cursor WHERE id=1)
+                FROM sqlite_sequence WHERE name='cloud_local_change_counter'""").use {
+                check(it.moveToFirst())
+                CloudSchedulingSequence(it.getLong(0), it.getLong(1))
+            }
+        }.distinctUntilChanged().flowOn(Dispatchers.IO)
     fun hasPendingProvenance():Boolean = db.query("SELECT EXISTS(SELECT 1 FROM cloud_local_pending_provenance)").use { it.moveToFirst();it.getInt(0)!=0 }
     private fun SupportSQLiteDatabase.scalar(sql:String)=query(sql).use{it.moveToFirst();it.getInt(0)}
     private fun install() {
@@ -37,6 +46,8 @@ internal class CloudLocalChanges(private val database:PhoneCompanionDatabase) {
         schemaCookie=db.scalar("PRAGMA schema_version")
     }
 }
+
+internal data class CloudSchedulingSequence(val sequence: Long, val lastNonCursor: Long)
 
 internal val CLOUD_CHANGE_TABLES=listOf("phone_articles","phone_rss_sources","phone_saved_items","notes","note_folders","note_assets","note_conflicts",
     "reader_presets","reader_font_assets","reader_background_assets","reader_deletions","app_meta",
@@ -54,6 +65,16 @@ internal fun installCloudLocalChanges(db:SupportSQLiteDatabase) {
             // Only initialization allocates an explicit value; normal mutations always use NULL.
             val missingSequence=db.query("SELECT NOT EXISTS(SELECT 1 FROM sqlite_sequence WHERE name='cloud_local_change_counter')").use{it.moveToFirst();it.getInt(0)!=0}
             db.execSQL("INSERT INTO cloud_local_change_counter(seq) SELECT MAX(COALESCE((SELECT seq FROM sqlite_sequence WHERE name='sync_change_log'),0),COALESCE((SELECT MAX(seq) FROM cloud_local_change_counter),0))+1 WHERE NOT EXISTS(SELECT 1 FROM sqlite_sequence WHERE name='cloud_local_change_counter')")
+            db.execSQL("CREATE TABLE IF NOT EXISTS cloud_local_non_cursor(id INTEGER PRIMARY KEY,seq INTEGER NOT NULL)")
+            db.execSQL("INSERT OR IGNORE INTO cloud_local_non_cursor SELECT 1,seq FROM sqlite_sequence WHERE name='cloud_local_change_counter'")
+            db.execSQL("CREATE TABLE IF NOT EXISTS cloud_local_dirty(tbl TEXT NOT NULL,key TEXT NOT NULL,seq INTEGER NOT NULL,PRIMARY KEY(tbl,key))")
+            db.execSQL("CREATE INDEX IF NOT EXISTS cloud_local_dirty_seq ON cloud_local_dirty(seq,tbl,key)")
+            db.execSQL("CREATE TABLE IF NOT EXISTS cloud_local_dirty_floor(id INTEGER PRIMARY KEY,seq INTEGER NOT NULL)")
+            db.execSQL("INSERT OR IGNORE INTO cloud_local_dirty_floor SELECT 1,seq FROM sqlite_sequence WHERE name='cloud_local_change_counter'")
+            db.execSQL("CREATE TABLE IF NOT EXISTS note_asset_ref_dirty(noteId TEXT PRIMARY KEY NOT NULL)")
+            db.execSQL("CREATE TABLE IF NOT EXISTS note_asset_refs(noteId TEXT NOT NULL,ownerKey TEXT NOT NULL,storageKey TEXT NOT NULL,PRIMARY KEY(noteId,ownerKey,storageKey))")
+            db.execSQL("CREATE INDEX IF NOT EXISTS note_asset_refs_storage ON note_asset_refs(storageKey,ownerKey)")
+            db.execSQL("CREATE TABLE IF NOT EXISTS note_asset_ref_source(id INTEGER PRIMARY KEY,identity TEXT NOT NULL)")
             var rebuildPending=db.query("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='cloud_local_pending_provenance'").use { it.moveToFirst();it.getInt(0)==0 }
             db.execSQL("CREATE TABLE IF NOT EXISTS cloud_local_pending_provenance(articleId TEXT PRIMARY KEY NOT NULL)")
             val existing=db.query("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name LIKE 'cloud_local_change_%'").use { c ->
@@ -72,7 +93,29 @@ internal fun installCloudLocalChanges(db:SupportSQLiteDatabase) {
                             (if(op=="UPDATE")"DELETE FROM cloud_local_pending_provenance WHERE articleId=OLD.articleId;" else "")+
                             (if(op=="DELETE")"" else "INSERT OR IGNORE INTO cloud_local_pending_provenance SELECT NEW.articleId WHERE NEW.pending IS NOT NULL;")
                     } else ""
-                    val sql="CREATE TRIGGER $name AFTER $op ON `$table`$guard BEGIN $pending INSERT INTO cloud_local_change_counter(seq) VALUES(NULL); DELETE FROM cloud_local_change_counter WHERE seq < last_insert_rowid(); END"
+                    val cursorCondition = if (op == "UPDATE" && table == "phone_articles") {
+                        val cursor = setOf("readingProgress", "readingPositionBytes", "readingPositionContentHash", "readingPositionChangedAt", "isRead")
+                        val others = changes.filterNot(cursor::contains).joinToString(" AND ") { "OLD.`$it` IS NEW.`$it`" }
+                        // Autosave may mark an article read. An explicit read-state write has no cursor change.
+                        " WHERE NOT (($others) AND (OLD.readingProgress IS NOT NEW.readingProgress OR " +
+                            "OLD.readingPositionBytes IS NOT NEW.readingPositionBytes OR " +
+                            "OLD.readingPositionContentHash IS NOT NEW.readingPositionContentHash))"
+                    } else ""
+                    val nonCursor = "UPDATE cloud_local_non_cursor SET seq=last_insert_rowid()$cursorCondition;"
+                    val deleted = op == "DELETE"
+                    val dirty = cloudDirtyKey(table, if (deleted) "OLD" else "NEW") +
+                        if (op == "UPDATE") cloudDirtyKey(table, "OLD") else ""
+                    val noteRefs = if (table in setOf("notes", "note_conflicts")) {
+                        val aliases = if (op == "UPDATE") listOf("OLD", "NEW") else listOf(if (deleted) "OLD" else "NEW")
+                        val fields = if (table == "notes") listOf("noteId", "deleted", "markdown", "baseMarkdown")
+                            else listOf("noteId", "baseMarkdown", "localMarkdown", "remoteMarkdown")
+                        val refGuard = if (op == "UPDATE") " WHERE " +
+                            fields.joinToString(" OR ") { "OLD.`$it` IS NOT NEW.`$it`" } else ""
+                        aliases.joinToString("") { alias ->
+                            "INSERT INTO note_asset_ref_dirty SELECT $alias.noteId$refGuard ON CONFLICT(noteId) DO NOTHING;"
+                        }
+                    } else ""
+                    val sql="CREATE TRIGGER $name AFTER $op ON `$table`$guard BEGIN $pending INSERT INTO cloud_local_change_counter(seq) VALUES(NULL); $nonCursor DELETE FROM cloud_local_change_counter WHERE seq < last_insert_rowid(); $dirty $noteRefs END"
                     if(existing[name]!=sql) { db.execSQL("DROP TRIGGER IF EXISTS $name");db.execSQL(sql);rebuildPending=true }
                 }
             }
@@ -85,4 +128,20 @@ internal fun installCloudLocalChanges(db:SupportSQLiteDatabase) {
             }
             db.setTransactionSuccessful()
         } finally { db.endTransaction() }
+}
+
+/** Read the witness sequence, rather than last_insert_rowid(), across multiple key writes. */
+internal fun cloudDirtyKey(table: String, alias: String): String {
+    val (domain, key) = when (table) {
+        "phone_articles", "article_register_provenance" -> "phone_articles" to "$alias.articleId"
+        "phone_rss_sources" -> table to "$alias.url"
+        "imported_books", "imported_book_chapters" -> "imported_books" to "$alias.bookId"
+        "imported_book_reading" -> table to "$alias.bookId || ':' || $alias.chapterIndex"
+        "notes", "note_conflicts" -> "notes" to "$alias.noteId"
+        "note_folders" -> table to "$alias.folderId"
+        "note_assets" -> table to "$alias.storageKey"
+        else -> return ""
+    }
+    return "INSERT INTO cloud_local_dirty(tbl,key,seq) VALUES('$domain',$key," +
+        "(SELECT seq FROM cloud_local_change_counter)) ON CONFLICT(tbl,key) DO UPDATE SET seq=excluded.seq;"
 }

@@ -15,6 +15,7 @@ import kotlin.concurrent.withLock
 
 /** Conditional publication for originals and caches. All writers share this CAS boundary. */
 internal object ConditionalBodyFile {
+    class RevisionChanged : IllegalStateException("body_revision_changed")
     private val locks=ConcurrentHashMap<String,ReentrantLock>()
     fun digest(file:File):String? {
         if(!file.exists())return null
@@ -49,7 +50,7 @@ internal object ConditionalBodyFile {
             .put("actualSha256",actual?:JSONObject.NULL).put("incomingSha256",incoming?:JSONObject.NULL).put("attempts",Math.addExact(count,1))
         val stage=File.createTempFile(".conflict-",".part",record.parentFile)
         try{FileOutputStream(stage).use{it.write(body.toString().toByteArray());it.fd.sync()};Files.move(stage.toPath(),record.toPath(),StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING);syncDirectory(record.parentFile!!)}finally{stage.delete()}
-        throw IllegalStateException("body_revision_changed")
+        throw RevisionChanged()
     }
     fun conflictRecord(target:File):File=File(stateDirectory(target),id(target)+".conflict.json")
     fun install(target:File,raw:ByteArray,expectedSha:String?=hex(MessageDigest.getInstance("SHA-256").digest(raw)),beforeCommit:()->Unit={}) {

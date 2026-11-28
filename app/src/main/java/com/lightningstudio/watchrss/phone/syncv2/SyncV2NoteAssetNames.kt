@@ -44,18 +44,26 @@ internal object SyncV2NoteAssetNames {
         """.trimIndent())
         // Only sync writes this table. Include its changes in the existing scan witness.
         val triggers = db.controlQuery(
-            "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name=?", arrayOf(aliases)
-        ).use { rows -> buildSet { while (rows.moveToNext()) add(rows.getString(0)) } }
+            "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name=?", arrayOf(aliases)
+        ).use { rows -> buildMap { while (rows.moveToNext()) put(rows.getString(0), rows.getString(1)) } }
         for (operation in listOf("INSERT", "UPDATE", "DELETE")) {
             val name = "syncv2_note_asset_alias_${operation.lowercase()}"
-            if (name in triggers) continue
-            db.execSQL("""
+            val dirty = com.lightningstudio.watchrss.phone.data.db.cloudDirtyKey(
+                "note_assets", if (operation == "DELETE") "OLD" else "NEW"
+            ) + if (operation == "UPDATE") com.lightningstudio.watchrss.phone.data.db.cloudDirtyKey("note_assets", "OLD") else ""
+            val sql = """
                 CREATE TRIGGER $name
                 AFTER $operation ON $aliases BEGIN
                     INSERT INTO cloud_local_change_counter(seq) VALUES(NULL);
+                    UPDATE cloud_local_non_cursor SET seq=last_insert_rowid();
                     DELETE FROM cloud_local_change_counter WHERE seq < last_insert_rowid();
+                    $dirty
                 END
-            """.trimIndent())
+            """.trimIndent()
+            if (triggers[name] != sql) {
+                db.execSQL("DROP TRIGGER IF EXISTS $name")
+                db.execSQL(sql)
+            }
         }
     }
 

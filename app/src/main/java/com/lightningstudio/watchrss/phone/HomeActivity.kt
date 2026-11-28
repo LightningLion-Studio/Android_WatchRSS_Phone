@@ -201,6 +201,16 @@ class HomeActivity : ComponentActivity() {
                     ) {
                         MainScreen(
                         uiState = state,
+                        onReauthenticate = if (
+                            com.lightningstudio.watchrss.phone.account.rememberAccountSessionStatus(container.accountRepository) ==
+                            com.lightningstudio.watchrss.phone.account.AccountSessionStatus.EXPIRED
+                        ) {
+                            {
+                                startActivity(AccountActivity.createIntent(
+                                    this@HomeActivity, finishAfterLogin = true, reauthenticate = true
+                                ))
+                            }
+                        } else null,
                         supportDestination = pendingSupportDestination.value,
                         onSupportDestinationConsumed = {
                             pendingSupportDestination.value = null

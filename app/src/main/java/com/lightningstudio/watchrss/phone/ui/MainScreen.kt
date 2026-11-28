@@ -322,6 +322,7 @@ private sealed interface RecentImportEntry {
 @Composable
 fun MainScreen(
     uiState: MainUiState,
+    onReauthenticate: (() -> Unit)? = null,
     onUrlChange: (String) -> Unit,
     onImportArticle: () -> Unit,
     onImportFile: () -> Unit,
@@ -1160,8 +1161,11 @@ fun MainScreen(
         }
         Scaffold(
             topBar = {
-                if (showScaffoldTopBar) {
-                    RenderGlobalTopBar()
+                Column {
+                    if (showScaffoldTopBar) RenderGlobalTopBar()
+                    if (onReauthenticate != null && selectedReaderArticle == null) {
+                        com.lightningstudio.watchrss.phone.AccountReauthenticationCard(onLogin = onReauthenticate)
+                    }
                 }
             },
             bottomBar = {

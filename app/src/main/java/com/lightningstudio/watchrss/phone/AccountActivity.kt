@@ -94,6 +94,8 @@ import androidx.compose.ui.semantics.contentType
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
+import com.lightningstudio.watchrss.phone.account.AccountSessionStatus
+import com.lightningstudio.watchrss.phone.account.rememberAccountSessionStatus
 import com.lightningstudio.watchrss.phone.account.AccountLoginAction
 import com.lightningstudio.watchrss.phone.account.AccountDeletionResult
 import com.lightningstudio.watchrss.phone.account.AccountSecurityStatus
@@ -277,7 +279,9 @@ internal fun AccountScreen(
     var authorizationFailure by rememberSaveable { mutableStateOf<AccountAuthorizationFailure?>(null) }
     var authorizationOwner by rememberSaveable { mutableStateOf<String?>(null) }
     var forceReauthenticationConsumed by rememberSaveable { mutableStateOf(false) }
-    val reauthenticationOwner by accountRepository.reauthenticationOwner.collectAsState()
+    val sessionStatus = rememberAccountSessionStatus(accountRepository)
+    val hasUsableSession = sessionStatus == AccountSessionStatus.USABLE
+    val sessionExpired = sessionStatus == AccountSessionStatus.EXPIRED
     LaunchedEffect(forceReauthentication) {
         if (forceReauthentication && !forceReauthenticationConsumed) {
             forceReauthenticationConsumed = true
@@ -293,8 +297,8 @@ internal fun AccountScreen(
         com.lightningstudio.watchrss.phone.cloud.rememberCloudSyncEntryAllowed(it)
     } ?: cloudSyncService.canOpenCloudSync()
     val coroutineScope = rememberCoroutineScope()
-    var page by rememberSaveable(session?.userId) {
-        mutableStateOf(if (initialSection == AccountSection.CLOUD_SYNC && session != null && cloudEntryAllowed) AccountPage.CLOUD_SYNC else AccountPage.ROOT)
+    var page by rememberSaveable {
+        mutableStateOf(if (initialSection == AccountSection.CLOUD_SYNC && cloudEntryAllowed) AccountPage.CLOUD_SYNC else AccountPage.ROOT)
     }
     var showCloudInventory by remember(session?.userId) { mutableStateOf(false) }
     LaunchedEffect(cloudEntryAllowed) {
@@ -624,7 +628,7 @@ internal fun AccountScreen(
                 },
                 enabled = !busy
             ) { Text(if (busy) "正在重试…" else "重试设备授权") }
-        } else if (shouldShowAccountLogin(session, reauthenticationOwner, forceLoginPending)) {
+        } else if (!hasUsableSession || forceLoginPending) {
             Text(
                 "登录",
                 style = MaterialTheme.typography.titleLarge,
@@ -1092,7 +1096,7 @@ internal fun AccountScreen(
                     member = cloudSyncState.member,
                     hasLocalKey = cloudSyncService.hasLocalAccountKey()
                 ),
-                enabled = !busy && session != null && reauthenticationOwner == null && accountRepository.hasUsableSession,
+                enabled = !busy,
                 onClick = onCloudSyncClick
             )
             val pairingContext = LocalContext.current
@@ -2018,13 +2022,23 @@ internal fun AccountScreen(
         )
     }
 
-    LaunchedEffect(sectionReady, paymentOrdersLoading) {
-        if (sectionReady && !paymentOrdersLoading) sectionRequester.bringIntoView()
+    LaunchedEffect(sectionReady, paymentOrdersLoading, sessionExpired) {
+        if (sectionReady && !paymentOrdersLoading && !sessionExpired) sectionRequester.bringIntoView()
     }
 
     AdaptiveWindowScope(modifier = Modifier.fillMaxSize()) { windowInfo ->
         val rootPane: @Composable () -> Unit = {
-            AccountPageScaffold(title = "账号", onBack = ::closeAccount) {
+            AccountPageScaffold(title = "账号", onBack = ::closeAccount, scrollToTop = sessionExpired) {
+                if (sessionExpired && !forceLoginPending) {
+                    AccountReauthenticationCard {
+                        context.startActivity(AccountActivity.createIntent(context, finishAfterLogin = true, reauthenticate = true))
+                    }
+                }
+                if (forceLoginPending) {
+                    accountControls(::openCloudSync)
+                    AccountFeedback(message = message, error = accountError)
+                    return@AccountPageScaffold
+                }
                 AccountIdentityPanel(summary = session?.phoneMasked ?: "未登录")
                 val accessSummary = when (val access = appAccessState) {
                     is AppAccessState.Authorized -> access.summary
@@ -2098,7 +2112,7 @@ internal fun AccountScreen(
                                                 onClick = {
                                                     membershipPurchase.resume(AccountPage.ROOT, order)
                                                 },
-                                                enabled = !busy && accountRepository.hasUsableSession
+                                                enabled = !busy && hasUsableSession
                                             ) { Text("继续支付") }
                                         }
                                         if (order.refundable) {
@@ -2123,8 +2137,15 @@ internal fun AccountScreen(
                         }
                     }
                 }
-                accountControls(::openCloudSync)
-                if (cloudEntryAllowed && page == AccountPage.ROOT && !accountRepository.hasUsableSession) {
+                if (!sessionExpired) accountControls(::openCloudSync)
+                if (cloudEntryAllowed && !hasUsableSession) {
+                    CloudSyncEntryCard(
+                        summary = if (sessionExpired) "登录已过期" else "登录后可管理云同步",
+                        enabled = !busy,
+                        onClick = ::openCloudSync
+                    )
+                }
+                if (cloudEntryAllowed && page == AccountPage.ROOT && !hasUsableSession) {
                     CloudMembershipPurchaseButton(enabled = !busy && purchaseLauncher?.busy == false) {
                         membershipPurchase.open(AccountPage.ROOT)
                     }
@@ -2145,8 +2166,8 @@ internal fun AccountScreen(
                 val resetOwner = session?.userId
                 var resetScreen by remember(resetOwner) { mutableStateOf<Boolean?>(null) }
                 var checkedReset by remember(resetOwner) { mutableStateOf(false) }
-                LaunchedEffect(resetOwner, page, showCloudInventory, reauthenticationOwner) {
-                    if (page != AccountPage.CLOUD_SYNC || showCloudInventory || reauthenticationOwner != null) {
+                LaunchedEffect(resetOwner, page, showCloudInventory, sessionStatus) {
+                    if (page != AccountPage.CLOUD_SYNC || showCloudInventory || !hasUsableSession) {
                         checkedReset = false
                         resetScreen = null
                     } else if (resetOwner != null && !checkedReset) {
@@ -2158,7 +2179,7 @@ internal fun AccountScreen(
                 }
                 val resumeReset = resetScreen
                 if (resumeReset != null && resetOwner != null && page == AccountPage.CLOUD_SYNC &&
-                    reauthenticationOwner == null && accountRepository.hasUsableSession) {
+                    hasUsableSession) {
                     com.lightningstudio.watchrss.phone.cloud.CloudStorageResetScreen(
                         service = cloudSyncService,
                         userId = resetOwner,
@@ -2172,14 +2193,25 @@ internal fun AccountScreen(
                 } else AccountPageScaffold(
                     title = if (showCloudInventory) "频道云库存" else "云同步",
                     onBack = ::leaveCloudSync,
-                    backEnabled = paneTransition == null
+                    backEnabled = paneTransition == null,
+                    scrollToTop = sessionExpired
                 ) {
                     val activeSession = session
                     if (!cloudEntryAllowed) {
                         return@AccountPageScaffold
                     }
-                    if (activeSession == null || reauthenticationOwner != null || !accountRepository.hasUsableSession) {
-                        Text("登录后可管理云同步。")
+                    if (activeSession == null || !hasUsableSession) {
+                        val onLogin = {
+                            context.startActivity(AccountActivity.createIntent(
+                                context, finishAfterLogin = true, reauthenticate = sessionExpired
+                            ))
+                        }
+                        if (sessionExpired) {
+                            AccountReauthenticationCard(cloud = true, onLogin = onLogin)
+                        } else {
+                            Text("登录后可管理云同步。")
+                            Button(onClick = onLogin) { Text("去登录") }
+                        }
                         if (!showCloudInventory) {
                             CloudMembershipPurchaseButton(enabled = !busy && purchaseLauncher?.busy == false) {
                                 membershipPurchase.open(AccountPage.CLOUD_SYNC)
@@ -2307,8 +2339,13 @@ private fun AccountPageScaffold(
     title: String,
     onBack: () -> Unit,
     backEnabled: Boolean = true,
+    scrollToTop: Boolean = false,
     content: @Composable ColumnScope.() -> Unit
 ) {
+    val scroll = rememberScrollState()
+    LaunchedEffect(scrollToTop) {
+        if (scrollToTop) scroll.scrollTo(0)
+    }
     AdaptiveWindowScope(modifier = Modifier.fillMaxSize()) { windowInfo ->
         Scaffold(
             topBar = {
@@ -2334,7 +2371,7 @@ private fun AccountPageScaffold(
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
-                            .verticalScroll(rememberScrollState())
+                            .verticalScroll(scroll)
                             .padding(
                                 horizontal = if (windowInfo.isMediumOrExpanded) 32.dp else 20.dp,
                                 vertical = 20.dp
@@ -2577,10 +2614,24 @@ private enum class AccountAuthorizationFailure {
 
 private const val MAX_PASSKEY_DISPLAY_NAME_CHARS = 64
 
-internal fun shouldShowAccountLogin(
-    session: com.lightningstudio.watchrss.phone.account.PhoneAccountSession?,
-    reauthenticationOwner: String?, forceReauthentication: Boolean
-): Boolean = session == null || reauthenticationOwner != null || forceReauthentication
+@Composable
+internal fun AccountReauthenticationCard(cloud: Boolean = false, onLogin: () -> Unit) {
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        colors = androidx.compose.material3.CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.errorContainer,
+            contentColor = MaterialTheme.colorScheme.onErrorContainer
+        )
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                if (cloud) "登录已过期，请重新登录以继续云同步" else "登录已过期，请重新登录",
+                fontWeight = FontWeight.SemiBold
+            )
+            Button(onClick = onLogin) { Text("重新登录") }
+        }
+    }
+}
 
 /** The real login-completion callback always runs device authorization reconciliation. */
 internal suspend fun completePhoneAccountAuthentication(coordinator: com.lightningstudio.watchrss.phone.account.AppAccessCoordinator) = coordinator.reconcile()

@@ -84,7 +84,7 @@ class PhoneAccountRepository(
     suspend fun beginSameAccountReauthentication() = sessionStore.beginSameAccountReauthentication()
 
     val hasUsableSession: Boolean
-        get() = reauthenticationOwner.value == null && session.value?.let { it.isUsableForAuthentication && it.userId.isNotBlank() && it.accessToken.isNotBlank() } == true
+        get() = accountSessionStatus(session.value, reauthenticationOwner.value) == AccountSessionStatus.USABLE
 
     val installId: String
         get() = installationIdentity.installId

@@ -921,6 +921,15 @@ class SyncV2P6ProductTest {
     }
 
     @Test fun resetRoundConsumesReadyAndRevokedDeviceCanRecoverSameSyncV2Scope() = runBlocking {
+        // The manifest is disabled in this fixture. Keep the scheduled retry inert
+        // while the test drives the reset round directly through the service.
+        val context = RuntimeEnvironment.getApplication()
+        if (runCatching { androidx.work.WorkManager.getInstance(context) }.isFailure) {
+            androidx.work.WorkManager.initialize(context, androidx.work.Configuration.Builder()
+                .setExecutor { }
+                .setTaskExecutor { }
+                .build())
+        }
         Server().use { server -> Host(server, "reset-device", bodyChannel = false).use { host ->
             ServiceEntry(host).use { entry ->
                 val scope = entry.prepareResetRound()

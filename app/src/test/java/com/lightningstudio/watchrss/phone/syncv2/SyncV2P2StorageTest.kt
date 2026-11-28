@@ -162,6 +162,15 @@ class SyncV2P2StorageTest {
                     val parent=path.removePrefix("state-refs/");val ref=index.refs.single{it.getJSONObject("body").getString("stateOid")==parent}
                     json(dto().put("parentOid",parent).put("refsOid",SyncV2Codec.oid("state-refs",ref)).put("authorDeviceId",signer().deviceId).put("keyId",signer().keyId).put("totalBytes",SyncV2Codec.utf8(SyncV2Codec.canonical(ref)).size))
                 }
+                path == "objects/batch-get" -> {
+                    val requested = JSONObject(request.body.readUtf8()).getJSONArray("oids")
+                    val found = JSONArray()
+                    for (i in 0 until requested.length()) {
+                        val oid = requested.getString(i)
+                        found.put(JSONObject().put("oid", oid).put("bytes", SyncV2Codec.b64(objects.getValue(oid))))
+                    }
+                    json(dto().put("objects", found).put("nextOids", JSONArray()))
+                }
                 path.startsWith("objects/") -> {val oid=path.removePrefix("objects/");okhttp3.mockwebserver.MockResponse().setHeader("ETag",oid).setBody(okio.Buffer().write(objects.getValue(oid)))}
                 path=="events" ->json(JSONObject().put("error",JSONObject().put("code","history_expired").put("retryable",true).put("retryAfterMillis",JSONObject.NULL).put("details",JSONObject()))).setResponseCode(410)
                 else ->okhttp3.mockwebserver.MockResponse().setResponseCode(500)

@@ -192,6 +192,15 @@ class SyncV2C7ReviewTest {
             SyncV2NoteBudget.reserve(directory,1024,1024).use{reservation->
                 assertEquals(1024L,reservation.reservedBytes)
                 assertTrue(directory.listFiles()!!.isEmpty())
+                assertEquals("storage_pressure",code{SyncV2NoteBudget.reserve(directory,1,1024)})
+            }
+            SyncV2NoteBudget.reserve(directory,1024,1024).use{second->
+                assertEquals(1024L,second.reservedBytes)
+                second.close()
+                second.close()
+                SyncV2NoteBudget.reserve(directory,1024,1024).use{third->
+                    assertEquals(1024L,third.reservedBytes)
+                }
             }
             assertTrue(directory.listFiles()!!.isEmpty())
         }finally{directory.deleteRecursively()}

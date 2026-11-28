@@ -5,6 +5,8 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload
 import org.json.JSONObject
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /** 25.6: charge old/new business graphs, journals, sealed closure and attachments together.
  * No reuse discount is claimed here: unconfirmed OIDs pay the worst-case staging charge. */
@@ -21,10 +23,21 @@ internal object SyncV2NoteBudget {
         val statFsAvailable=runCatching{StatFs(directory.path).availableBytes}.getOrDefault(0L)
         return if(statFsAvailable>0L)statFsAvailable else directory.usableSpace
     }
-    class Reservation internal constructor(val reservedBytes:Long):AutoCloseable {override fun close()=Unit}
+    private val outstanding=AtomicLong(0L)
+    class Reservation internal constructor(val reservedBytes:Long):AutoCloseable {
+        private val released=AtomicBoolean(false)
+        override fun close() {
+            if(released.compareAndSet(false,true))outstanding.addAndGet(-reservedBytes)
+        }
+    }
     fun reserve(directory:File,bytes:Long,available:Long=availableSpace(directory)):Reservation {
-        if(bytes<0||!directory.isDirectory||available<bytes)SyncV2Codec.fail("storage_pressure")
-        return Reservation(bytes)
+        if(bytes<0||!directory.isDirectory)SyncV2Codec.fail("storage_pressure")
+        while(true) {
+            val current=outstanding.get()
+            val remaining=available-current
+            if(remaining<bytes||current>Long.MAX_VALUE-bytes)SyncV2Codec.fail("storage_pressure")
+            if(outstanding.compareAndSet(current,current+bytes))return Reservation(bytes)
+        }
     }
     fun reserve(db:SupportSQLiteDatabase,scope:String,entity:String,ordinaryBytes:Long,closureUpperBound:Long,payload:JSONObject):Reservation {
         val id=db.query("SELECT logical_id FROM syncv2_identity_map WHERE entity_key=? LIMIT 1",arrayOf(entity)).use{if(it.moveToFirst())it.getString(0)else null}

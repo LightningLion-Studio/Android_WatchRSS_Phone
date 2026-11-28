@@ -67,6 +67,13 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
         if (maxBytes != null && expected.bytes > maxBytes) SyncV2Codec.fail("quota_exceeded")
         return NoteAssetFiles.verifiedOriginal(db, files, key, expected) { sourceReads?.file(it) }
     }
+    private class MissingSource(val reason: String, cause: Throwable? = null) : Exception(cause)
+    private fun missingSource(reason: String, cause: Throwable? = null): Nothing =
+        throw SyncV2ProtocolError("closure_incomplete", MissingSource(reason, cause))
+
+    fun contentFailureReason(error: Exception): String =
+        (error.cause as? MissingSource)?.reason ?: "source_check_failed"
+
     private fun sources(record:JSONObject,maxBytes:Long?=null,onUnregisteredNoteAsset:((String)->Unit)?=null):List<Pair<String,Source>> {
         val m=record.getJSONObject("meta");val id=m.getString("logicalId");val value=record.getJSONObject("value")
         if(SyncV2Business.logicalId(m.getString("kind"),value)!=id || identity.entity(m.getString("kind"),id)!=m.getString("entityKey"))SyncV2Codec.fail("identity_conflict")
@@ -75,7 +82,8 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
                 // CursorWindow must never hold a whole imported body. Read bounded BLOB slices,
                 // then preserve both original text fields in the private recovery envelope.
                 val lengths=db.query("SELECT length(CAST(contentText AS BLOB)),length(CAST(contentHtml AS BLOB)),contentHash FROM phone_articles WHERE articleId=?",arrayOf(id)).use{c->
-                    if(!c.moveToFirst() || value.optString("contentHash")!=c.getString(2))SyncV2Codec.fail("closure_incomplete")
+                    if (!c.moveToFirst()) missingSource("article_row_missing")
+                    if (value.optString("contentHash") != c.getString(2)) missingSource("article_hash_mismatch")
                     c.getLong(0) to if(c.isNull(1))null else c.getLong(1)
                 }
                 if(lengths.first+(lengths.second?:0)>quotaBytes)SyncV2Codec.fail("quota_exceeded")
@@ -88,17 +96,18 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
                     }
                     return out.toByteArray().toString(Charsets.UTF_8)
                 }
-                if(lengths.first==0L && (lengths.second?:0)==0L && value.optString("contentHash").isNotEmpty())SyncV2Codec.fail("closure_incomplete")
+                if (lengths.first == 0L && (lengths.second ?: 0) == 0L && value.optString("contentHash").isNotEmpty())
+                    missingSource("article_body_empty")
                 val bytes=SyncV2Codec.utf8(SyncV2Codec.canonical(JSONObject().put("contentText",text("contentText",lengths.first)).put("contentHtml",lengths.second?.let{text("contentHtml",it)}?:JSONObject.NULL)))
                 listOf("article" to byteSource(bytes))
             }
             "book" -> {
                 val original = originals.committedBook(id, value, maxBytes) { sourceReads?.file(it) }
-                    ?: SyncV2Codec.fail("closure_incomplete")
+                    ?: missingSource("book_original_missing")
                 listOf("book" to fileSource(original))
             }
             "asset" -> {
-                val original = assetOriginal(id, maxBytes) ?: SyncV2Codec.fail("closure_incomplete")
+                val original = assetOriginal(id, maxBytes) ?: missingSource("asset_original_missing")
                 listOf("asset/$id" to fileSource(original))
             }
             "note"->{
@@ -108,10 +117,15 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
                 val keys=texts.flatMap{com.lightningstudio.watchrss.phone.connection.bluetooth.NoteAssetSyncPayload.referencedStorageKeys(it)}.toSortedSet()
                 keys.mapNotNull {name->
                     if (!SyncV2NoteAssetNames.exists(db, name) && onUnregisteredNoteAsset != null) {
-                        onUnregisteredNoteAsset(name)
+                        try {
+                            onUnregisteredNoteAsset(name)
+                        } catch (e: SyncV2ProtocolError) {
+                            if (e.code == "closure_incomplete") missingSource("note_asset_registration_failed", e)
+                            throw e
+                        }
                         return@mapNotNull null
                     }
-                    val original = assetOriginal(name, maxBytes) ?: SyncV2Codec.fail("closure_incomplete")
+                    val original = assetOriginal(name, maxBytes) ?: missingSource("note_asset_original_missing")
                     "asset/$name" to fileSource(original)
                 }
             }
@@ -128,11 +142,19 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
             else->false
         }
     }
-    fun contentReady(record:JSONObject,onUnregisteredNoteAsset:((String)->Unit)?=null):Boolean =
-        record.getJSONObject("state").getJSONObject("payload").optBoolean("deleted",false) || try {
-            sources(record,onUnregisteredNoteAsset=onUnregisteredNoteAsset)
-            true
-        } catch(_:Exception) { false }
+    fun contentReady(record: JSONObject): Boolean = contentFailure(record) == null
+
+    fun contentFailure(record: JSONObject, onUnregisteredNoteAsset: ((String) -> Unit)? = null): Exception? {
+        if (record.getJSONObject("state").getJSONObject("payload").optBoolean("deleted")) return null
+        return try {
+            sources(record, onUnregisteredNoteAsset = onUnregisteredNoteAsset)
+            null
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            e
+        }
+    }
     fun guardedAlreadyPresent(link: JSONObject): Boolean {
         val archive = SyncV2BluetoothInbox(projection, files)
         return guardedAlreadyPresent(db, files, originals, link, archive::read)

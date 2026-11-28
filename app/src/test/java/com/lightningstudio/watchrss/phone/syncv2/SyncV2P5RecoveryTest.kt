@@ -10,6 +10,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.SQLiteMode
+import org.robolectric.shadows.ShadowLog
 import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
@@ -166,6 +167,77 @@ class SyncV2P5RecoveryTest {
         val sync=SyncV2CloudSync(w.f.client(),w.identity,w.projection,{it=="synthetic-phone"},{w.key},now={w.f.now});sync.readCurrent();sync.publishIndex(w.f.signer,w.key,1);sync.readCurrent()
         val current=w.projection.cloudRows().single{it.getJSONObject("row").getString("entityKey")==row.getString("entityKey")}.getJSONObject("row")
         assertEquals(recipeOid,current.getString("recipeOid"));assertEquals(row.getString("bodyRevision"),current.getString("bodyRevision"))
+        // Roll back to a generation with the same uploaded body, after editing local reading
+        // state on a metadata-only copy. The choice must retain the authenticated recipe.
+        w.target = w.current.getString("commitOid")
+        w.sql.execSQL("UPDATE phone_articles SET contentText='', isRead=1, readingProgress=0.5 WHERE articleId='local-article'")
+        w.drain()
+        w.rollbackRemote()
+        a.refresh()
+        w.drain()
+        val preview = a.pendingChoice()!!.preview
+        assertTrue(a.choose(preview, "local").getBoolean("localCommitted"))
+        val selected = w.projection.cloudRows().single {
+            it.getJSONObject("row").getString("entityKey") == row.getString("entityKey")
+        }
+        assertEquals(recipeOid, selected.getJSONObject("row").getString("recipeOid"))
+        assertEquals(row.getString("bodyRevision"), selected.getJSONObject("row").getString("bodyRevision"))
+        assertTrue(selected.getJSONObject("state").getJSONObject("payload").getBoolean("isRead"))
+
+        // A recipe for the old content hash cannot authorize keeping a different local body.
+        w.sql.execSQL("UPDATE phone_articles SET contentHash='changed-hash' WHERE articleId='local-article'")
+        w.edit("another local edit")
+        w.rollbackRemote()
+        a.refresh()
+        w.drain()
+        val before = w.publishCalls
+        code("closure_incomplete") { a.choose(a.pendingChoice()!!.preview, "local") }
+        assertEquals(before, w.publishCalls)
+        assertNotNull(a.pendingChoice())
+    }
+    @Test
+    fun keepLocalRejectsAnArticleWithoutLocalBodyWhenCloudOnlyHasAPromise() = SyncV2P5Fixture().use { w ->
+        w.pending()
+        addArticle(w)
+        val actions = w.actions()
+        actions.choose(actions.preview(), "local")
+        w.drain()
+        val entity = w.identity.entity("article", "local-article")
+        val row = w.projection.cloudRows().single {
+            it.getJSONObject("row").getString("entityKey") == entity
+        }.getJSONObject("row")
+        assertTrue(row.isNull("recipeOid"))
+        assertFalse(row.isNull("promiseId"))
+
+        w.target = w.current.getString("commitOid")
+        w.sql.execSQL("UPDATE phone_articles SET contentText='', isRead=1 WHERE articleId='local-article'")
+        w.drain()
+        w.rollbackRemote()
+        actions.refresh()
+        w.drain()
+        val before = w.publishCalls
+        code("closure_incomplete") { actions.choose(actions.pendingChoice()!!.preview, "local") }
+        assertEquals(before, w.publishCalls)
+        assertNotNull(actions.pendingChoice())
+        val warnings = ShadowLog.getLogsForTag(SyncV2ChoiceDiagnostics.TAG)
+        assertTrue(warnings.any {
+            it.type == android.util.Log.WARN && it.throwable == null &&
+                it.msg == "stage=prepareChoice.contentReady code=closure_incomplete kind=article " +
+                "reason=article_body_empty entityKeyPrefix=${entity.take(8)} count=1"
+        })
+    }
+    @Test
+    fun choiceDiagnosticsRedactUnexpectedCodesAndRawFields() {
+        val sensitive = "private_token"
+        val error = SyncV2CloudError(sensitive, details = JSONObject()
+            .put("missing", JSONArray().put("https://example.invalid/$sensitive")))
+        val meta = JSONObject().put("kind", sensitive).put("entityKey", sensitive)
+        SyncV2ChoiceDiagnostics.warn("ChoiceDialog.choose", error, meta)
+        val warning = ShadowLog.getLogsForTag(SyncV2ChoiceDiagnostics.TAG).last()
+        assertEquals(android.util.Log.WARN, warning.type)
+        assertNull(warning.throwable)
+        assertEquals("stage=ChoiceDialog.choose code=other kind=unknown reason=operation_failed " +
+            "entityKeyPrefix=- count=1", warning.msg)
     }
     @Test fun laterRollbackCannotSilentlyDiscardAJustPublishedPromiseBody():Unit=SyncV2P5Fixture().use{w->
         w.pending();addArticle(w);val a=w.actions();a.choose(a.preview(),"local");w.drain()

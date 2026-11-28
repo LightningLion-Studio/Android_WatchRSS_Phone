@@ -37,6 +37,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.lightningstudio.watchrss.phone.syncv2.syncV2ErrorCode
+import com.lightningstudio.watchrss.phone.syncv2.SyncV2ChoiceDiagnostics
 import com.lightningstudio.watchrss.phone.syncv2.SyncV2PhoneUiPort
 import com.lightningstudio.watchrss.phone.syncv2.SyncV2UiState
 import kotlinx.coroutines.CancellationException
@@ -197,7 +198,10 @@ private fun ChoiceDialog(port: SyncV2PhoneUiPort, state: SyncV2UiState, onClose:
         syncV2ActionScope.launch {
             val result = try { Result.success(port.openChoice()) } catch (e: CancellationException) { throw e } catch (e: Throwable) { Result.failure(e) }
             result.onSuccess { p -> if (alive.value && opened) preview = p else closeQuietly(port, p) }
-                .onFailure { e -> if (alive.value && opened) error = SyncV2View.errorText(codeOf(e)) }
+                .onFailure { e ->
+                    SyncV2ChoiceDiagnostics.warn("ChoiceDialog.open", e)
+                    if (alive.value && opened) error = SyncV2View.errorText(codeOf(e))
+                }
         }
         onDispose { opened = false }
     }
@@ -207,7 +211,11 @@ private fun ChoiceDialog(port: SyncV2PhoneUiPort, state: SyncV2UiState, onClose:
         busy = true
         launchAction(alive, {
             try { when (option.key) { "cloud" -> port.chooseCloud(p); "local" -> port.chooseLocal(p); else -> port.chooseMerge(p) } }
-            catch (e: CancellationException) { throw e } catch (e: Throwable) { closeQuietly(port, p); throw e }
+            catch (e: CancellationException) { throw e } catch (e: Throwable) {
+                SyncV2ChoiceDiagnostics.warn("ChoiceDialog.choose", e)
+                closeQuietly(port, p)
+                throw e
+            }
         }) { result ->
             busy = false
             result.onSuccess { onApplied() }.onFailure { e ->

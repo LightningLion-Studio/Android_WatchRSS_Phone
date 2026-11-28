@@ -13,6 +13,7 @@ import java.util.concurrent.atomic.AtomicReference
 /** Durable ciphertext checkpoints. No legacy business routes or business ACK API. */
 internal class SyncV2BodyHttp(private val client:SyncV2CloudClient,private val check:()->Unit) {
     private val scope get()=client.scope
+    @Volatile private var legacyDownloadPartSize = false
     private fun json(method: String, path: String, body: JSONObject? = null,
         query: Map<String, String> = emptyMap(), beforeRequest: () -> Unit = {}): JSONObject =
         jsonResponse(method, path, body, query, beforeRequest).first
@@ -151,6 +152,9 @@ internal class SyncV2BodyHttp(private val client:SyncV2CloudClient,private val c
     private fun SyncV2CloudError.rejectsLargePart() =
         httpStatus == 413 || (httpStatus == 400 && code == "object_too_large")
 
+    private fun SyncV2CloudError.rejectsDownloadPartSize() =
+        httpStatus == 400 && code == "invalid_schema"
+
     fun download(id:String,hash:String,size:Int,directory:File,beforeTransfer:()->Unit={}):ByteArray {
         SyncV2Codec.unhex(id,16);SyncV2Codec.unhex(hash,32);if(size !in 1..16777216)SyncV2Codec.fail("invalid_schema")
         directory.mkdirs();val target=File(directory,hash);val partial=File(directory,"$hash.part")
@@ -159,14 +163,34 @@ internal class SyncV2BodyHttp(private val client:SyncV2CloudClient,private val c
         var at=partial.length().toInt()
         while(at<size) {
             check()
-            val (bytes, headers) = client.bodyBytes("GET", "carriers/$id/objects/$hash",
-                query = mapOf("offset" to at.toString()), raw = true, beforeRequest = beforeTransfer)
+            val (bytes, headers) = readDownloadPart(id, hash, at, beforeTransfer)
             fun header(k:String)=headers.entries.firstOrNull{it.key.equals(k,true)}?.value
-            if(header("x-watchrss-body-total-bytes")!=size.toString() || header("x-watchrss-body-offset")!=at.toString() || bytes.size!=minOf(65536,size-at))SyncV2Codec.fail("invalid_range")
+            val validSize = bytes.isNotEmpty() && bytes.size <= minOf(MAX_PART_BYTES, size - at) &&
+                (at + bytes.size == size || bytes.size % PART_ALIGNMENT == 0)
+            if(header("x-watchrss-body-total-bytes")!=size.toString() || header("x-watchrss-body-offset")!=at.toString() || !validSize)SyncV2Codec.fail("invalid_range")
             FileOutputStream(partial,true).use{it.write(bytes);it.fd.sync()};at+=bytes.size
         }
         val raw=partial.readBytes();if(raw.size!=size || SyncV2BodyCodec.hash(raw)!=hash){atomic(partial,byteArrayOf());SyncV2Codec.fail("hash_mismatch")}
         atomic(target,raw);removeCompletedPart(partial);return raw
+    }
+
+    private fun readDownloadPart(id: String, hash: String, offset: Int,
+        beforeTransfer: () -> Unit): Pair<ByteArray, Map<String, String>> {
+        val path = "carriers/$id/objects/$hash"
+        val baseQuery = mapOf("offset" to offset.toString())
+        if (legacyDownloadPartSize) {
+            return client.bodyBytes("GET", path, query = baseQuery, raw = true, beforeRequest = beforeTransfer)
+        }
+        return try {
+            client.bodyBytes("GET", path,
+                query = baseQuery + ("partSize" to MAX_PART_BYTES.toString()),
+                raw = true, beforeRequest = beforeTransfer)
+        } catch (error: SyncV2CloudError) {
+            if (!error.rejectsDownloadPartSize()) throw error
+            legacyDownloadPartSize = true
+            check()
+            client.bodyBytes("GET", path, query = baseQuery, raw = true, beforeRequest = beforeTransfer)
+        }
     }
     private fun removeCompletedPart(partial:File) {
         if(partial.exists()) {

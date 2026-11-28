@@ -117,7 +117,7 @@ internal class SyncV2CloudClient(
                     active()
                     throw SyncV2CloudError("object_too_large", httpStatus = response.code)
                 }
-                val limit = if(raw && response.isSuccessful) 266264 else 1048576
+                val limit = if (raw && !bodyChannel && response.isSuccessful) 266264 else 1048576
                 val data = response.body?.byteStream()?.use { input ->
                     val out=java.io.ByteArrayOutputStream();val block=ByteArray(8192)
                     while(true) { val n=input.read(block);if(n<0)break;if(out.size()+n>limit)SyncV2Codec.fail("object_too_large");out.write(block,0,n) };out.toByteArray()

@@ -52,11 +52,14 @@ class SyncV2BodyTransportTest {
         var losePart=false;var loseRead=false;var bodyRequests=0;var reserveCalls=0;var beforeRead:(()->Unit)?=null
         var beforeList: (() -> Unit)? = null
         var beforePut: ((String, Int, ByteArray) -> MockResponse?)? = null
+        var customReadResponse: ((String, Int, String?, ByteArray) -> MockResponse?)? = null
         var reservePartHeader: String? = null
         var missingPartHeader: String? = null
         var maxAcceptedPart = 65_536
+        var maxServedPart = 65_536
         var missingCalls = 0
         val putLengths = mutableListOf<Int>()
+        val readPartSizes = mutableListOf<String?>()
         var listCalls = 0
         var completeCalls = 0
         var downloadBytes = 0L
@@ -116,8 +119,26 @@ class SyncV2BodyTransportTest {
                     for(id in ready.sorted()) {val d=descriptors.getValue(id);if(d.getJSONObject("body").getString("entityKey")==url.queryParameter("entityKey")&&d.getJSONObject("body").getString("bodyRevision")==url.queryParameter("bodyRevision"))a.put(JSONObject().put("carrierId",id).put("descriptor",d))}
                     json(JSONObject().put("carriers",a).put("nextAfter",JSONObject.NULL))
                 }else if("/objects/" in p) {
-                    val hash=p.split('/')[3];val raw=objects.getValue(hash);val at=url.queryParameter("offset")!!.toInt();reads.add(at);downloadBytes+=minOf(65536,raw.size-at);beforeRead?.invoke()
-                    if(loseRead&&at>0){loseRead=false;MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST)}else MockResponse().setBody(Buffer().write(raw.copyOfRange(at,minOf(raw.size,at+65536)))).setHeader("x-watchrss-body-total-bytes",raw.size).setHeader("x-watchrss-body-offset",at)
+                    val hash=p.split('/')[3];val raw=objects.getValue(hash);val at=url.queryParameter("offset")!!.toInt()
+                    val requestedPartSize = url.queryParameter("partSize")
+                    reads.add(at)
+                    readPartSizes.add(requestedPartSize)
+                    beforeRead?.invoke()
+                    customReadResponse?.invoke(hash, at, requestedPartSize, raw) ?: run {
+                        val partSize = if (maxServedPart > 65_536) {
+                            requestedPartSize?.toIntOrNull()?.coerceIn(65_536, maxServedPart) ?: 65_536
+                        } else maxServedPart
+                        val slice = raw.copyOfRange(at, minOf(raw.size, at + partSize))
+                        downloadBytes += slice.size
+                        if (loseRead && at > 0) {
+                            loseRead = false
+                            MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST)
+                        } else {
+                            MockResponse().setBody(Buffer().write(slice))
+                                .setHeader("x-watchrss-body-total-bytes", raw.size)
+                                .setHeader("x-watchrss-body-offset", at)
+                        }
+                    }
                 }else error("unexpected body route $p")
             }
         }}
@@ -303,6 +324,123 @@ class SyncV2BodyTransportTest {
             withTimeout(5_000) { upload.join() }
 
             assertEquals(0, backend.completeCalls)
+        }
+    }
+
+    @Test fun downloadRequests512KAndAcceptsLegacy64KParts() {
+        SyncV2P5Fixture().use { f ->
+            val backend = Backend(f)
+            val client = f.f.client().also { it.capabilities() }
+            val raw = ByteArray(600_000) { (it % 251).toByte() }
+            val hash = SyncV2BodyCodec.hash(raw)
+            backend.objects[hash] = raw
+            backend.maxServedPart = 65_536
+
+            val dir = File(f.root, "download-legacy-64k")
+            val got = SyncV2BodyHttp(client) {}.download("aa".repeat(16), hash, raw.size, dir)
+
+            assertArrayEquals(raw, got)
+            assertEquals((0 until raw.size step 65_536).toList(), backend.reads)
+            assertTrue(backend.readPartSizes.isNotEmpty() && backend.readPartSizes.all { it == "524288" })
+            assertFalse(File(dir, "$hash.part").exists())
+            client.close()
+        }
+    }
+
+    @Test fun downloadDowngradesWhenLegacyBackendRejectsPartSizeWith400InvalidSchema() {
+        SyncV2P5Fixture().use { f ->
+            val backend = Backend(f)
+            val client = f.f.client().also { it.capabilities() }
+            val firstRaw = ByteArray(200_000) { (it % 251).toByte() }
+            val secondRaw = ByteArray(150_000) { ((it + 17) % 251).toByte() }
+            val firstHash = SyncV2BodyCodec.hash(firstRaw)
+            val secondHash = SyncV2BodyCodec.hash(secondRaw)
+            backend.objects[firstHash] = firstRaw
+            backend.objects[secondHash] = secondRaw
+            backend.maxServedPart = 65_536
+            var partSizeRejections = 0
+            backend.customReadResponse = { _, _, partSizeParam, _ ->
+                if (partSizeParam != null) {
+                    partSizeRejections++
+                    partError(400, "invalid_schema")
+                } else null
+            }
+
+            val http = SyncV2BodyHttp(client) {}
+            val dir = File(f.root, "download-legacy-400-fallback")
+            val firstGot = http.download("aa".repeat(16), firstHash, firstRaw.size, dir)
+            val secondGot = http.download("aa".repeat(16), secondHash, secondRaw.size, dir)
+
+            assertArrayEquals(firstRaw, firstGot)
+            assertArrayEquals(secondRaw, secondGot)
+            assertEquals(1, partSizeRejections)
+            assertEquals(listOf("524288") + List(7) { null }, backend.readPartSizes)
+            assertEquals(listOf(0, 0, 65_536, 131_072, 196_608, 0, 65_536, 131_072), backend.reads)
+            assertFalse(File(dir, "$firstHash.part").exists())
+            assertFalse(File(dir, "$secondHash.part").exists())
+            client.close()
+        }
+    }
+
+    @Test fun downloadUses512KPartsAndShortTailFromNewBackend() {
+        for (size in listOf(1_100_000, 180_000, 524_288)) {
+            SyncV2P5Fixture().use { f ->
+                val backend = Backend(f)
+                backend.maxServedPart = 524_288
+                val client = f.f.client().also { it.capabilities() }
+                val raw = ByteArray(size) { (it % 251).toByte() }
+                val hash = SyncV2BodyCodec.hash(raw)
+                backend.objects[hash] = raw
+
+                val dir = File(f.root, "download-512k-$size")
+                val got = SyncV2BodyHttp(client) {}.download("bb".repeat(16), hash, raw.size, dir)
+
+                assertArrayEquals(raw, got)
+                assertEquals((0 until raw.size step 524_288).toList(), backend.reads)
+                assertTrue(backend.readPartSizes.isNotEmpty() && backend.readPartSizes.all { it == "524288" })
+                assertFalse(File(dir, "$hash.part").exists())
+                client.close()
+            }
+        }
+    }
+
+    @Test fun downloadRejectsEmptyOversizedAndUnalignedIntermediatePartsAsInvalidRange() {
+        data class Case(val label: String, val totalSize: Int, val partSize: Int,
+            val totalHeader: Int = totalSize, val offsetHeader: Int = 0)
+        val cases = listOf(
+            Case("empty chunk", 100_000, 0),
+            Case("exceeds remaining", 100_000, 100_001),
+            Case("exceeds 512 KiB by 1", 700_000, 524_289),
+            Case("exceeds 512 KiB aligned", 700_000, 589_824),
+            Case("intermediate under 64 KiB", 700_000, 32_768),
+            Case("intermediate unaligned", 700_000, 100_000),
+            Case("intermediate 512 KiB minus 1", 700_000, 524_287),
+            Case("mismatched total header", 100_000, 65_536, totalHeader = 100_001),
+            Case("mismatched offset header", 100_000, 65_536, offsetHeader = 65_536)
+        )
+        for (case in cases) {
+            SyncV2P5Fixture().use { f ->
+                val backend = Backend(f)
+                val client = f.f.client().also { it.capabilities() }
+                val raw = ByteArray(case.totalSize) { (it % 251).toByte() }
+                val hash = SyncV2BodyCodec.hash(raw)
+                backend.objects[hash] = raw
+                backend.customReadResponse = { _, _, partSizeParam, _ ->
+                    assertEquals("524288", partSizeParam)
+                    MockResponse()
+                        .setBody(Buffer().write(ByteArray(case.partSize) { (it % 251).toByte() }))
+                        .setHeader("x-watchrss-body-total-bytes", case.totalHeader)
+                        .setHeader("x-watchrss-body-offset", case.offsetHeader)
+                }
+
+                val dir = File(f.root, "download-invalid")
+                val error = runCatching {
+                    SyncV2BodyHttp(client) {}.download("cc".repeat(16), hash, raw.size, dir)
+                }.exceptionOrNull()
+                assertEquals(case.label, "invalid_range", error?.message)
+                assertFalse(case.label, File(dir, hash).exists())
+                client.close()
+            }
         }
     }
 

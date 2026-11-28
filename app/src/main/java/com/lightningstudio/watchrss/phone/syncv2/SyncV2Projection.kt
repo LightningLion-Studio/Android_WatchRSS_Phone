@@ -225,7 +225,7 @@ internal class SyncV2Projection(
             db.endTransaction()
             return result
         } catch(e:Throwable) {
-            val primary=if(e is android.database.sqlite.SQLiteFullException)IllegalStateException("storage_pressure",e)else e
+            val primary=if(e is android.database.sqlite.SQLiteFullException)SyncV2ProtocolError("storage_pressure",e)else e
             failure=primary;throw primary
         } finally {
             // SQLITE_FULL may already have rolled back the native transaction. Android's
@@ -233,7 +233,7 @@ internal class SyncV2Projection(
             try{if(!ended)db.endTransaction()}catch(e:Throwable){
                 val primary=failure
                 if(primary!=null){if(primary!==e)primary.addSuppressed(e)}
-                else throw if(e is android.database.sqlite.SQLiteFullException)IllegalStateException("storage_pressure",e)else e
+                else throw if(e is android.database.sqlite.SQLiteFullException)SyncV2ProtocolError("storage_pressure",e)else e
             }
             if(started)try{fault("after-transaction")}catch(e:Throwable){
                 val primary=failure;if(primary==null)throw e else if(primary!==e)primary.addSuppressed(e)

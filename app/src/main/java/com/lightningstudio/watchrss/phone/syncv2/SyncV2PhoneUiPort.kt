@@ -17,7 +17,7 @@ internal class SyncV2PhoneUiPort(private val product:SyncV2PhoneProduct,private 
     }
     internal fun disabled(){_state.value=SyncV2UiState()}
     internal fun failed(error:Throwable) {
-        val code=(error as? SyncV2CloudError)?.code?:error.message?.takeIf{Regex("[a-z][a-z0-9_]{0,63}").matches(it)}?:"temporarily_unavailable"
+        val code=syncV2ErrorCode(error)?:"temporarily_unavailable"
         _state.value=_state.value.copy(phase=if(code in setOf("storage_pressure","trusted_time_unavailable","signing_state_unavailable"))"blocked"else"error",errorCode=code)
     }
     internal fun refresh() {

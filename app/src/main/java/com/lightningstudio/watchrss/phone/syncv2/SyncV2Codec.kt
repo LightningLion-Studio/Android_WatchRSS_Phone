@@ -15,12 +15,21 @@ import javax.crypto.Mac
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
+internal class SyncV2ProtocolError(val code: String, cause: Throwable? = null) : IllegalStateException(code, cause)
+
+/** Extract only codes supplied by the local protocol or the cloud client's error decoder. */
+internal fun syncV2ErrorCode(error: Throwable): String? = when (error) {
+    is SyncV2ProtocolError -> error.code
+    is SyncV2CloudError -> error.code
+    else -> null
+}
+
 /** Local projection codec. No network, account creation, key rotation or business apply entry point. */
 internal object SyncV2Codec {
     val maxD64 = BigInteger("18446744073709551615")
     private val decimal = Regex("0|[1-9][0-9]{0,19}")
     val kinds = setOf("article", "book", "note", "source", "rss-state", "book-reading", "asset", "folder")
-    fun fail(code: String): Nothing = throw IllegalStateException(code)
+    fun fail(code: String): Nothing = throw SyncV2ProtocolError(code)
     fun d64(value: String): BigInteger {
         if (!decimal.matches(value)) fail("invalid_schema")
         return BigInteger(value).also { if (it > maxD64) fail("invalid_schema") }

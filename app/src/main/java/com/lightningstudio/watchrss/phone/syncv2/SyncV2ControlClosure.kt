@@ -99,7 +99,7 @@ internal class SyncV2ControlClosure(private val identity: SyncV2Identity, privat
             var ordinary:JSONObject?=null
             var segmented=false
             val isolated=runCatching{
-                if(rowFeatures.isNotEmpty()&&!noteSegmentsRead)throw IllegalStateException("unsupported_feature")
+                if(rowFeatures.isNotEmpty()&&!noteSegmentsRead)SyncV2Codec.fail("unsupported_feature")
                 // The parent wire is opened from bytes that stay inside this iteration only.
                 val read=openWith(if(stage!=null)::fetchRow else ::fetch,row.getString("stateOid"),"invalid_schema")
                 wire=read
@@ -111,7 +111,7 @@ internal class SyncV2ControlClosure(private val identity: SyncV2Identity, privat
                     // F1/W3: an unsupported or over-budget remote note is isolated per entity. The
                     // authenticated raw bytes and the local business body both survive; other
                     // entities continue to apply and the cursor advances (25.8, ruling F1).
-                    if(!noteSegmentsRead) throw IllegalStateException("unsupported_feature")
+                    if(!noteSegmentsRead) SyncV2Codec.fail("unsupported_feature")
                     val ctx=SyncV2NoteWiring.context(identity,authors,contentKey)
                     val stateOid=row.getString("stateOid")
                     val rowRead=if(stage!=null)::fetchRow else ::fetch

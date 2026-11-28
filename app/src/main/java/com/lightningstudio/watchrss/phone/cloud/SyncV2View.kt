@@ -6,6 +6,8 @@ import java.util.Calendar
 
 /** T-SYNCV2-UI §2: copy and view rules shared with the watch and the mini program. */
 internal object SyncV2View {
+    private val protocolCode = Regex("^[a-z0-9_.-]{1,64}$")
+
     enum class Target { CHOICE, UNOPENABLE, RECOVERY, HISTORY }
     enum class Tone { ATTENTION, ERROR, MUTED }
     data class Notice(val key: String, val title: String, val detail: String, val tone: Tone,
@@ -40,6 +42,13 @@ internal object SyncV2View {
     fun errorText(code: String): String = when (code) {
         "choice_stale" -> "资料刚有变化，请重新查看后再选。"
         "merge_unavailable" -> "这次修改无法自动合并。"
+        "ref_conflict" -> "云端资料有新修改。本机内容已保留，请重新查看后再选。"
+        "rollback_conflict" -> "云端恢复版本已变化。本机内容已保留，请重新查看后再选。"
+        "action_pending", "choice_pending" -> "上一项同步操作还未完成。本机内容已保留，请稍后重试。"
+        "closure_incomplete" -> "同步缺少所需资料。本机内容已保留，请稍后重试。"
+        "object_too_large" -> "有资料超过同步大小限制。本机内容已保留。"
+        "rate_limited" -> "同步请求过于频繁。本机内容已保留，请稍后重试。"
+        "authentication_required" -> "同步需要重新验证身份。本机内容已保留，请重新登录后重试。"
         "reset_record_conflict" -> "新云存储中有同 ID 的本机资料。两份资料均已保留，迁移已暂停。"
         "window_expired", "temporarily_unavailable" -> "网络或云端暂时不可用，请稍后重试。"
         "quota_exceeded" -> "云空间已满。"
@@ -53,7 +62,8 @@ internal object SyncV2View {
         "trusted_time_unavailable" -> "暂时无法确认云端时间，请联网后重试。"
         "signing_state_unavailable" -> "本机签名状态不可用，暂时只能接收云端修改。"
         "device_alias_recovery_required" -> "本机设备身份冲突。请保留应用数据并联系支持核对设备登记。"
-        else -> "本机内容已保留，请稍后重试。"
+        else -> if (protocolCode.matches(code)) "本机内容已保留，请稍后重试（$code）。"
+            else "本机内容已保留，请稍后重试。"
     }
 
     /** Fixed order: 保留云端, 保留本机, 合并两边. One-sided choices confirm by dialog. */

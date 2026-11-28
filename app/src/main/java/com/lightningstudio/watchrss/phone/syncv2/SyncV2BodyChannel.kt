@@ -332,5 +332,5 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
         }
         return JSONObject().put("placeholder",!ready).put("reason",if(ready)JSONObject.NULL else"body_not_synced").put("keepLocalBody",true)
     }
-    companion object {fun code(e:Exception)=(e as? SyncV2CloudError)?.code?:e.message?.takeIf{Regex("[a-z][a-z0-9_]{0,63}").matches(it)}?:"body_channel_pending"}
+    companion object {fun code(e:Exception)=syncV2ErrorCode(e)?:"body_channel_pending"}
 }

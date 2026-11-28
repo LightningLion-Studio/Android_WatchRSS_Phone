@@ -36,7 +36,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.lightningstudio.watchrss.phone.syncv2.SyncV2CloudError
+import com.lightningstudio.watchrss.phone.syncv2.syncV2ErrorCode
 import com.lightningstudio.watchrss.phone.syncv2.SyncV2PhoneUiPort
 import com.lightningstudio.watchrss.phone.syncv2.SyncV2UiState
 import kotlinx.coroutines.CancellationException
@@ -61,7 +61,7 @@ internal fun CloudSyncRoundNotice(usesSyncV2: Boolean, state: PhoneCloudSyncStat
 }
 
 private fun codeOf(error: Throwable): String =
-    (error as? SyncV2CloudError)?.code ?: error.message?.takeIf { Regex("[a-z][a-z0-9_]{0,63}").matches(it) } ?: "temporarily_unavailable"
+    syncV2ErrorCode(error) ?: "temporarily_unavailable"
 
 /**
  * T-SYNCV2-UI §2: Sync v2 notices on 云同步 and their four sub-views. With the

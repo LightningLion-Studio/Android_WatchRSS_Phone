@@ -57,7 +57,7 @@ class ArticleProvenanceStore(private val db:PhoneCompanionDatabase) {
             val row=dao.get(id)?.takeIf{it.raw.isNotEmpty()}?:return@withTransaction false
             val pending=row.pending?.let(::JSONObject)?:JSONObject()
             pending.put("latestReadingProgress",JSONObject().put("readingProgress",progress)
-                .put("readingPositionContentHash",db.phoneArticleDao().getById(id)?.contentHash?:""))
+                .put("readingPositionContentHash",db.phoneArticleDao().getBodyMetadataById(id)?.contentHash?:""))
             if(pending.toString().toByteArray().size>65520)throw CloudFormatUpgradeRequired("article_pending_full")
             dao.put(row.copy(pending=pending.toString()));true
         }

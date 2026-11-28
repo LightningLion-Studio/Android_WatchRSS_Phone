@@ -57,7 +57,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -95,8 +95,6 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 
 class PlatformWebViewActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -210,7 +208,8 @@ internal fun PlatformWebViewScreen(
     var screenBackProgress by remember { mutableFloatStateOf(0f) }
     val density = LocalDensity.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val coroutineScope = rememberCoroutineScope()
+    val application = LocalContext.current.applicationContext as? PhoneCompanionApplication
+    val container = application?.container
     val onSaveScrollProgressState = rememberUpdatedState(onSaveScrollProgress)
     val onBackState = rememberUpdatedState(onBack)
     val canGoBack = webView?.canGoBack() == true
@@ -226,20 +225,11 @@ internal fun PlatformWebViewScreen(
         }
         lastSavedScrollProgress = clamped
         lastScrollSavedAt = now
-        coroutineScope.launch {
-            saver(clamped)
-        }
-    }
-
-    fun saveWebScrollProgressBlocking() {
-        val saver = onSaveScrollProgressState.value ?: return
-        runBlocking {
-            saver(webScrollProgress.coerceIn(0f, 1f))
-        }
+        container?.savePlatformReadingProgress { saver(clamped) }
     }
 
     fun handleBack() {
-        saveWebScrollProgressBlocking()
+        saveWebScrollProgress(force = true)
         onBackState.value()
     }
 
@@ -282,7 +272,7 @@ internal fun PlatformWebViewScreen(
             ) { value, _ ->
                 screenBackProgress = value
             }
-            saveWebScrollProgressBlocking()
+            saveWebScrollProgress(force = true)
             onBackState.value()
             screenBackProgress = 0f
         } catch (exception: CancellationException) {
@@ -298,7 +288,7 @@ internal fun PlatformWebViewScreen(
 
     DisposableEffect(url) {
         onDispose {
-            saveWebScrollProgressBlocking()
+            saveWebScrollProgress(force = true)
         }
     }
 
@@ -495,7 +485,7 @@ internal fun PlatformWebViewScreen(
                     if (onOpenFullscreen != null) {
                         GlassIconButton(
                             onClick = {
-                                saveWebScrollProgressBlocking()
+                                saveWebScrollProgress(force = true)
                                 onOpenFullscreen()
                             },
                             contentDescription = if (embeddedFullscreen) "缩小" else "全屏"
@@ -531,7 +521,7 @@ internal fun PlatformWebViewScreen(
                     if (onOpenFullscreen != null) {
                         GlassButton(
                             onClick = {
-                                saveWebScrollProgressBlocking()
+                                saveWebScrollProgress(force = true)
                                 onOpenFullscreen()
                             }
                         ) {

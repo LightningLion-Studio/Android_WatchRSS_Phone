@@ -546,6 +546,34 @@ class PhoneCompanionRepositoryTest {
     }
 
     @Test
+    fun readingAndFavoriteWritesLeaveLargeBodyUntouched() = runBlocking {
+        val dao = FakePhoneArticleDao()
+        val body = "腕上RSS📖".repeat(250_000)
+        val article = article("large", "https://example.com/large").copy(
+            contentText = body,
+            contentHtml = "<p>$body</p>",
+            contentHash = "original"
+        )
+        dao.items = listOf(article)
+        val repository = PhoneCompanionRepository(
+            FakePhoneSavedItemDao(), dao, FakePhoneRssSourceDao(), "test-phone"
+        )
+
+        repository.updateArticleReadingProgress(article.articleId, 0.5f)
+        repository.markArticleRead(article.articleId, true)
+        assertTrue(repository.toggleSaved(article, PhoneSavedItemType.FAVORITE).favoriteSaved)
+
+        val stored = dao.items.single()
+        assertEquals(body.toByteArray().size / 2L, stored.readingPositionBytes)
+        assertEquals("original", stored.readingPositionContentHash)
+        assertTrue(stored.isRead)
+        assertEquals(article.contentText, stored.contentText)
+        assertEquals(article.contentHtml, stored.contentHtml)
+        assertEquals(0, dao.fullArticleReads)
+        assertEquals(0, dao.upserts)
+    }
+
+    @Test
     fun refreshRssSource_rejectsImportedContentChannels() = runBlocking {
         val sourceUrl = ImportedContentIds.epubSourceUrl("book")
         val sourceDao = FakePhoneRssSourceDao().apply {
@@ -2821,7 +2849,7 @@ class PhoneCompanionRepositoryTest {
 
     private class FakePhoneArticleDao : PhoneArticleDao {
         override suspend fun hasAny() = items.isNotEmpty()
-        override suspend fun getBodyMetadataById(articleId:String)=getById(articleId)?.copy(contentHtml=null,contentText="")
+        override suspend fun getBodyMetadataById(articleId:String)=items.firstOrNull { it.articleId == articleId }?.copy(contentHtml=null,contentText="")
         override suspend fun getAllBodyMetadata()=items.map { it.copy(contentHtml=null,contentText="") }
         override suspend fun getBodyMetadataBySource(rssSourceUrl:String)=getByRssSourceUrl(rssSourceUrl).map { it.copy(contentHtml=null,contentText="") }
         override fun observeBodyMetadataById(articleId:String):Flow<PhoneArticleEntity?> = emptyFlow()
@@ -2874,7 +2902,47 @@ class PhoneCompanionRepositoryTest {
 
         override fun observeWatchLater(): Flow<List<PhoneArticleEntity>> = emptyFlow()
 
+        override suspend fun contentTextMarker(articleId: String, prefix: String): String? =
+            items.firstOrNull { it.articleId == articleId }?.contentText?.takeIf { it.startsWith(prefix) }
+
+        override suspend fun contentTextByteLength(articleId: String): Long =
+            items.first { it.articleId == articleId }.contentText.toByteArray(Charsets.UTF_8).size.toLong()
+
+        override suspend fun updateReadState(articleId: String, source: String, read: Boolean, now: Long): Int {
+            val previous = items.firstOrNull { it.articleId == articleId } ?: return 0
+            items = items.map {
+                if (it !== previous) it else it.copy(
+                    sourceDeviceId = source,
+                    isRead = read,
+                    readingPositionChangedAt = maxOf(now, it.readingPositionChangedAt + 1)
+                )
+            }
+            return 1
+        }
+
+        override suspend fun updateFavoriteState(articleId: String, source: String, saved: Boolean, now: Long,
+            sortOrder: Long, deleted: Boolean, deletedAt: Long) {
+            items = items.map {
+                if (it.articleId != articleId) it else it.copy(
+                    sourceDeviceId = source, favoriteSaved = saved, favoriteChangedAt = now,
+                    favoriteSortOrder = sortOrder, deleted = deleted, deletedAt = deletedAt
+                )
+            }
+        }
+
+        override suspend fun updateWatchLaterState(articleId: String, source: String, saved: Boolean, now: Long,
+            sortOrder: Long, deleted: Boolean, deletedAt: Long) {
+            items = items.map {
+                if (it.articleId != articleId) it else it.copy(
+                    sourceDeviceId = source, watchLaterSaved = saved, watchLaterChangedAt = now,
+                    watchLaterSortOrder = sortOrder, deleted = deleted, deletedAt = deletedAt
+                )
+            }
+        }
+
+        var fullArticleReads = 0
         override suspend fun getById(articleId: String): PhoneArticleEntity? {
+            fullArticleReads++
             return items.firstOrNull { it.articleId == articleId }
         }
 

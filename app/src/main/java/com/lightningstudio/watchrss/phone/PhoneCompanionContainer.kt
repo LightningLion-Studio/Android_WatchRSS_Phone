@@ -69,6 +69,16 @@ class PhoneCompanionContainer(context: Context) {
     fun diagnosticLibrarySnapshot()=withDiagnosticLibrary({org.json.JSONArray() to com.lightningstudio.watchrss.phone.diagnostics.DiagnosticFields.summary()}){it.books() to it.summary()}
     private val appContext = context.applicationContext
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var platformReadingSave: kotlinx.coroutines.Job? = null
+
+    @Synchronized
+    internal fun savePlatformReadingProgress(save: suspend () -> Unit) {
+        val previous = platformReadingSave
+        platformReadingSave = appScope.launch {
+            previous?.join()
+            save()
+        }
+    }
     private val accountEnvironment: AccountEnvironment by lazy {
         AccountEnvironment.active(appContext)
     }

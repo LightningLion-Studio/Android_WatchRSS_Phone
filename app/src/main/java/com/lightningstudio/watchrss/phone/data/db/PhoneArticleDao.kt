@@ -6,6 +6,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
+import com.lightningstudio.watchrss.phone.data.local.ARTICLE_CONTENT_MARKER_PREFIX
 import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -438,6 +439,86 @@ interface PhoneArticleDao {
         positionContentHash: String,
         positionChangedAt: Long
     )
+
+    @Query(
+        """SELECT CASE WHEN substr(contentText,1,length(:prefix)) = :prefix THEN contentText END
+        FROM phone_articles WHERE articleId = :articleId"""
+    )
+    suspend fun contentTextMarker(articleId: String, prefix: String = ARTICLE_CONTENT_MARKER_PREFIX): String?
+
+    @Query("SELECT length(CAST(contentText AS BLOB)) FROM phone_articles WHERE articleId = :articleId")
+    suspend fun contentTextByteLength(articleId: String): Long
+
+    @Query(
+        """UPDATE phone_articles SET sourceDeviceId = :source, isRead = :read,
+        readingPositionChangedAt = max(:now, readingPositionChangedAt + 1)
+        WHERE articleId = :articleId"""
+    )
+    suspend fun updateReadState(articleId: String, source: String, read: Boolean, now: Long): Int
+
+    @Transaction
+    suspend fun setReadState(articleId: String, source: String, read: Boolean, now: Long): Long? {
+        if (updateReadState(articleId, source, read, now) == 0) return null
+        return getBodyMetadataById(articleId)?.readingPositionChangedAt
+    }
+
+    @Query(
+        """UPDATE phone_articles SET sourceDeviceId = :source,
+        favoriteSaved = :saved, favoriteChangedAt = :now, favoriteSortOrder = :sortOrder,
+        deleted = :deleted, deletedAt = :deletedAt WHERE articleId = :articleId"""
+    )
+    suspend fun updateFavoriteState(articleId: String, source: String, saved: Boolean, now: Long,
+        sortOrder: Long, deleted: Boolean, deletedAt: Long)
+
+    @Query(
+        """UPDATE phone_articles SET sourceDeviceId = :source,
+        watchLaterSaved = :saved, watchLaterChangedAt = :now, watchLaterSortOrder = :sortOrder,
+        deleted = :deleted, deletedAt = :deletedAt WHERE articleId = :articleId"""
+    )
+    suspend fun updateWatchLaterState(articleId: String, source: String, saved: Boolean, now: Long,
+        sortOrder: Long, deleted: Boolean, deletedAt: Long)
+
+    @Transaction
+    suspend fun toggleSavedState(article: PhoneArticleEntity, source: String, favorite: Boolean, now: Long): PhoneArticleEntity {
+        val existing = getBodyMetadataById(article.articleId)
+        val current = existing ?: article
+        val toggled = if (favorite) current.copy(
+            favoriteSaved = !current.favoriteSaved,
+            favoriteChangedAt = now,
+            favoriteSortOrder = if (current.favoriteSaved) current.favoriteSortOrder else now
+        ) else current.copy(
+            watchLaterSaved = !current.watchLaterSaved,
+            watchLaterChangedAt = now,
+            watchLaterSortOrder = if (current.watchLaterSaved) current.watchLaterSortOrder else now
+        )
+        val deleted = !toggled.favoriteSaved && !toggled.watchLaterSaved &&
+            !toggled.independentSaved && toggled.rssSourceUrl.isNullOrBlank()
+        val updated = toggled.copy(sourceDeviceId = source, deleted = deleted, deletedAt = if (deleted) now else 0)
+        when {
+            existing == null -> upsert(updated)
+            favorite -> updateFavoriteState(article.articleId, source, updated.favoriteSaved, now,
+                updated.favoriteSortOrder, deleted, updated.deletedAt)
+            else -> updateWatchLaterState(article.articleId, source, updated.watchLaterSaved, now,
+                updated.watchLaterSortOrder, deleted, updated.deletedAt)
+        }
+        return updated
+    }
+
+    @Transaction
+    suspend fun saveReadingPosition(
+        articleId: String,
+        progress: Float,
+        now: Long,
+        positionAt: suspend (PhoneArticleEntity) -> Long
+    ): Long? {
+        val article = getBodyMetadataById(articleId) ?: return null
+        val position = positionAt(article)
+        if (article.readingProgress == progress && article.readingPositionBytes == position &&
+            article.readingPositionContentHash == article.contentHash && (progress <= 0 || article.isRead)) return null
+        val clock = maxOf(now, article.readingPositionChangedAt + 1)
+        updateReadingProgress(articleId, progress, position, article.contentHash, clock)
+        return clock
+    }
 
     @Upsert
     suspend fun upsert(article: PhoneArticleEntity)

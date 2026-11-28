@@ -453,32 +453,26 @@ class PhoneCompanionRepository(
 
     suspend fun markArticleRead(articleId: String, read: Boolean) = withContext(Dispatchers.IO) {
         articleProvenance?.guardEdit(articleId,JSONObject().put("operation","reading").put("isRead",read))
-        val article = articleDao.getById(articleId) ?: return@withContext
-        val at = maxOf(System.currentTimeMillis(), article.readingPositionChangedAt + 1)
-        articleDao.upsert(article.copy(sourceDeviceId = deviceId, isRead = read, readingPositionChangedAt = at))
+        val at = articleDao.setReadState(articleId, deviceId, read, System.currentTimeMillis()) ?: return@withContext
         recordArticleChange(articleId, "readingState", at)
     }
 
     suspend fun updateArticleReadingProgress(articleId: String, progress: Float) = withContext(Dispatchers.IO) {
-        if(articleProvenance?.stageReadingProgress(articleId,progress.coerceIn(0f,1f).toDouble())==true)return@withContext
-        val article = articleDao.getById(articleId) ?: return@withContext
         val clamped = progress.coerceIn(0f, 1f)
-        val byteLength = article.hydrateExternalText().contentText
-            .toByteArray(Charsets.UTF_8)
-            .size
-            .toLong()
-        val positionBytes = (byteLength.toDouble() * clamped.toDouble())
-            .roundToLong()
-            .coerceIn(0L, byteLength)
-        val changedAt = System.currentTimeMillis()
-        articleDao.updateReadingProgress(
-            articleId = articleId,
-            progress = clamped,
-            positionBytes = positionBytes,
-            positionContentHash = article.contentHash,
-            positionChangedAt = changedAt
-        )
-        recordArticleChange(articleId, "readingProgress", changedAt)
+        if (articleProvenance?.stageReadingProgress(articleId, clamped.toDouble()) == true) return@withContext
+        val at = articleDao.saveReadingPosition(articleId, clamped, System.currentTimeMillis()) { metadata ->
+            val storedLength = articleDao.contentTextByteLength(articleId)
+            // A marker fits within 160 bytes. Inline text never needs decoding to measure its length.
+            val byteLength = if (articleContentStore != null && storedLength in 1L..160L) {
+                val marker = articleDao.contentTextMarker(articleId)
+                if (marker != null && articleContentStore.isMarker(marker)) {
+                    articleContentStore.textChunkHandle(marker)?.byteLength
+                        ?: metadata.excerpt.toByteArray(Charsets.UTF_8).size.toLong()
+                } else storedLength
+            } else storedLength
+            (byteLength.toDouble() * clamped).roundToLong().coerceIn(0L, byteLength)
+        } ?: return@withContext
+        recordArticleChange(articleId, "readingProgress", at)
     }
 
     suspend fun importWebArticle(input: String): PhoneArticleEntity =
@@ -731,25 +725,8 @@ class PhoneCompanionRepository(
     suspend fun toggleSaved(article: PhoneArticleEntity, type: PhoneSavedItemType): PhoneArticleEntity =
         withContext(Dispatchers.IO) {
             articleProvenance?.guardEdit(article.articleId,JSONObject().put("operation","toggleSaved").put("type",type.name))
-            val current = articleDao.getById(article.articleId) ?: article
             val now = System.currentTimeMillis()
-            val updated = when (type) {
-                PhoneSavedItemType.FAVORITE -> current.copy(
-                    favoriteSaved = !current.favoriteSaved,
-                    favoriteChangedAt = now,
-                    favoriteSortOrder = if (!current.favoriteSaved) now else current.favoriteSortOrder,
-                    sourceDeviceId = deviceId,
-                    deleted = false
-                )
-                PhoneSavedItemType.WATCH_LATER -> current.copy(
-                    watchLaterSaved = !current.watchLaterSaved,
-                    watchLaterChangedAt = now,
-                    watchLaterSortOrder = if (!current.watchLaterSaved) now else current.watchLaterSortOrder,
-                    sourceDeviceId = deviceId,
-                    deleted = false
-                )
-            }.markDeletedIfEmpty(now)
-            articleDao.upsert(updated)
+            val updated = articleDao.toggleSavedState(article, deviceId, type == PhoneSavedItemType.FAVORITE, now)
             recordArticleChange(updated.articleId, "sourceState", now)
             updated
         }

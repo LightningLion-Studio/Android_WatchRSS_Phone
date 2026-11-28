@@ -26,7 +26,7 @@ class CloudLocalChangesTest {
     private fun open(name:String?=null,callback:Boolean=true)=
         (if(name==null)Room.inMemoryDatabaseBuilder(context,PhoneCompanionDatabase::class.java)
         else Room.databaseBuilder(context,PhoneCompanionDatabase::class.java,name))
-            .addMigrations(PhoneCompanionDatabase.MIGRATION_18_19,PhoneCompanionDatabase.MIGRATION_19_20)
+            .addMigrations(PhoneCompanionDatabase.MIGRATION_18_19,PhoneCompanionDatabase.MIGRATION_19_20,PhoneCompanionDatabase.MIGRATION_20_21)
             .apply{if(callback)addCallback(PhoneCompanionDatabase.ARTICLE_PROVENANCE_CALLBACK)}
             .allowMainThreadQueries().build().also{dbs+=it}
     private fun name()="fix5-cloud-counter-${System.nanoTime()}".also{names+=it}
@@ -100,6 +100,7 @@ class CloudLocalChangesTest {
         db.appMetaDao().set(AppMetaEntity("before-migration","changed"))
         val cp=checkpoint(changes)
         val sql=db.openHelper.writableDatabase
+        sql.execSQL("ALTER TABLE imported_books DROP COLUMN sourceUrl")
         for(table in listOf("article_register_versions","article_register_originals","article_register_provenance"))sql.execSQL("DROP TABLE $table")
         sql.version=18;db.close()
         val migrated=open(name);val after=CloudLocalChanges(migrated)
@@ -107,7 +108,7 @@ class CloudLocalChangesTest {
         migrated.appMetaDao().set(AppMetaEntity("after-migration","changed"))
         migrated.syncChangeLogDao().deleteAll()
         assertTrue(after.sequence()>cp.localMaxSeq)
-        assertEquals(20,migrated.openHelper.readableDatabase.version)
+        assertEquals(21,migrated.openHelper.readableDatabase.version)
     }
 
     @Test fun cloudFlowObservesChangeEvenWhenSameTransactionDeletesBluetoothHistory()=runBlocking<Unit> {

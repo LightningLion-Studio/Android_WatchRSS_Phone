@@ -30,6 +30,7 @@ import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
+import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchDebugLogForegroundRestricted
 import com.lightningstudio.watchrss.phone.BuildConfig
 import com.lightningstudio.watchrss.phone.data.backup.WATCHRSS_BACKUP_EXTENSION
 import com.lightningstudio.watchrss.phone.data.backup.WATCHRSS_BACKUP_MIME_TYPE
@@ -529,11 +530,15 @@ class HomeActivity : ComponentActivity() {
         lifecycleScope.launch {
             val container = (application as PhoneCompanionApplication).container
             viewModel.showSyncStatusMessage("正在连接手表并收集手表日志…")
-            val watchLog = runCatching {
+            val watchLogResult = runCatching {
                 viewModel.collectWatchDebugLog()
             }.onFailure { throwable ->
+                if (throwable is kotlinx.coroutines.CancellationException) throw throwable
                 Log.w(TAG, "Watch log unavailable; sharing phone log only", throwable)
-            }.getOrNull()
+            }
+            val watchLog = watchLogResult.getOrNull()
+            val watchHint = (watchLogResult.exceptionOrNull()
+                as? WatchDebugLogForegroundRestricted)?.message
             runCatching {
                 val directory = File(cacheDir, "shared_logs").apply { mkdirs() }
                 val file = File(directory, "watchrss-logs-${System.currentTimeMillis()}.txt")
@@ -550,7 +555,8 @@ class HomeActivity : ComponentActivity() {
                     "分享 WatchRSS 日志"
                 ))
                 val suffix = when {
-                    watchLog == null -> "（未连接到手表，仅含手机日志）"
+                    watchHint != null -> "（仅含手机日志）$watchHint"
+                    watchLog == null -> "（未能读取手表日志，仅含手机日志）"
                     watchLog.truncated -> "（含手表日志，已截取最新部分）"
                     else -> "（含手表日志）"
                 }

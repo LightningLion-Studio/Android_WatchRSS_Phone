@@ -46,7 +46,7 @@ class SyncV2P2StorageTest {
     @Test fun invalidBookCannotEnterProjectionAndBusinessSaveSurvivesRejection() {
         val db=room(root().resolve("phone.db"));val p=adapter(db);p.install()
         val book=JSONObject().put("bookId","phone-1-book").put("fingerprint","synthetic-book-fingerprint-phone-1").put("title","").put("chapterCount",1).put("deletedChapters",JSONArray()).put("deletionClock",0).put("deleted",false).put("deletedAt",0).put("updatedAt",0).put("sourceDeviceId","")
-        db.openHelper.writableDatabase.execSQL("INSERT INTO imported_books VALUES(?,?,'synthetic-hash',0)",arrayOf<Any>("phone-1-book",SyncV2Codec.canonical(book)))
+        db.openHelper.writableDatabase.execSQL("INSERT INTO imported_books(bookId,stateJson,packageSha256,packageBytes) VALUES(?,?,'synthetic-hash',0)",arrayOf<Any>("phone-1-book",SyncV2Codec.canonical(book)))
         assertEquals("invalid_schema",code{p.scanPage("imported_books")})
         assertEquals(1,scalar(db,"SELECT COUNT(*) FROM imported_books"));assertEquals(0,scalar(db,"SELECT COUNT(*) FROM syncv2_candidates"))
     }
@@ -200,7 +200,7 @@ class SyncV2P2StorageTest {
     @Test fun c11ControlPublicationQueriesCurrentPrefixAfterHistoricalReserveBeforePut() {
         val db=room(root().resolve("phone.db"));seed(db);val p=adapter(db);p.install();p.scanPage("notes")
         SyncV2P3Fixture().use { f ->
-            val calls=mutableListOf<String>()
+            val calls=java.util.Collections.synchronizedList(mutableListOf<String>())
             val mapping=JSONObject().put("scope",identity.scope).put("deviceId",f.signer.deviceId).put("keyId",f.signer.keyId)
                 .put("legacyDeviceId","synthetic-phone").put("approvalRevision","1")
             val binding=identity.signingBinding(f.signer,f.now,"0").put("deviceMapping",f.signer.signed("wrss.sync.v2/device-mapping",mapping))
@@ -228,9 +228,14 @@ class SyncV2P2StorageTest {
                 }
             }
             val sync=SyncV2CloudSync(f.client(),identity,p,{it=="synthetic-phone"},{contentKey},{f.now})
-            try{sync.publishIndex(f.signer,contentKey,1);fail("expected synthetic stop after first PUT")}
+            try{sync.publishIndex(f.signer,contentKey,1);fail("expected synthetic upload failure")}
             catch(e:SyncV2CloudError){assertEquals("cloud_account_busy",e.code)}
-            assertEquals(listOf("reserve","have","put"),calls);assertNull(p.pendingPublish());assertTrue(f.putOffsets.isEmpty())
+            assertEquals(listOf("reserve", "have"), calls.take(2))
+            val puts = calls.drop(2)
+            assertTrue(puts.size in 1..8)
+            assertTrue(puts.all { it == "put" })
+            assertNull(p.pendingPublish())
+            assertTrue(f.putOffsets.isEmpty())
         }
     }
     @Test fun definitiveCasRejectionDropsOnlyAttemptAndAllowsFreshRequest() {

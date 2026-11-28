@@ -1034,29 +1034,30 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
             SyncV2RecoveryStorage.Bundle(copy,pin,objects.filterKeys{it.startsWith("local-recovery$suffix/")}.mapKeys{it.key.removePrefix("local-recovery$suffix/")})
         }
     }
-    private fun upload(objects:Map<String,ByteArray>,actionId:String) {
-        val window=client.negotiate();val windowId=window.getString("windowId")
-        for(batch in objects.entries.filter{it.key.substringBefore(':') in setOf("meta","state","tree","commit")}.sortedBy{it.key}.chunked(64)) {
-            val reservation=client.reserve(id(),batch.map{it.key to it.value.size}).getString("reservationId")
-            val have=client.verifiedHaveWant(windowId,batch.map{it.key to it.value.size},now())
-            for((oid,bytes)in batch) {
-                val present=have.getValue(oid);if(present.getString("status")=="present")continue
-                var offset=present.getInt("durableOffset")
-                val previous=transferCheckpoint(actionId,oid)
-                if(previous!=null && (previous.getInt("totalBytes")!=bytes.size || previous.getString("oid")!=oid))SyncV2Codec.fail("idempotency_conflict")
-                if(previous!=null && previous.getInt("durableOffset")-offset>65536)throw SyncV2CloudError("offset_conflict",true,details=JSONObject().put("durableOffset",offset))
-                if(offset%65536!=0 && offset!=bytes.size)SyncV2Codec.fail("invalid_schema")
-                while(offset<bytes.size) {
-                    val end=minOf(offset+65536,bytes.size);val response=client.put(oid,offset,reservation,id(),bytes.copyOfRange(offset,end))
-                    if(response.getString("oid")!=oid || response.getLong("durableOffset")!=end.toLong())SyncV2Codec.fail("invalid_schema")
-                    client.verifyReceipt(response.getJSONObject("receipt"),oid,bytes.size.toLong(),end.toLong(),now());offset=end
-                    saveTransferCheckpoint(actionId,oid,bytes.size,offset);fault("control-frame:$offset")
+    private fun upload(objects: Map<String, ByteArray>, actionId: String, capture: ChoiceCapture) {
+        val upload = SyncV2ControlUpload(client, capture.accountOid, capture.accountRevision,
+            capture.generation, ::now, ::id, "choice_stale")
+        upload.objects(
+            objects.keys.filter { it.substringBefore(':') in setOf("meta", "state", "tree", "commit") }.sorted(),
+            objects::getValue,
+            checkOffset = { oid, total, offset ->
+                transferCheckpoint(actionId, oid)?.let { previous ->
+                    if (previous.getInt("totalBytes") != total || previous.getString("oid") != oid)
+                        SyncV2Codec.fail("idempotency_conflict")
+                    if (previous.getInt("durableOffset") - offset > 65536)
+                        throw SyncV2CloudError("offset_conflict", true, details = JSONObject().put("durableOffset", offset))
                 }
-                val complete=client.complete(oid,reservation,id(),bytes.size);client.verifyReceipt(complete.getJSONObject("receipt"),oid,bytes.size.toLong(),bytes.size.toLong(),now())
-                saveTransferCheckpoint(actionId,oid,bytes.size,bytes.size)
+            },
+            checkpoint = { oid, total, offset ->
+                saveTransferCheckpoint(actionId, oid, total, offset)
+                fault("control-frame:$offset")
             }
+        )
+        val refs = objects.keys.filter { it.startsWith("state-refs:") }
+        client.parallelControlUpload(refs) { oid ->
+            client.stateRefs(SyncV2Wire.parse(objects.getValue(oid), 262144, true))
         }
-        for((oid,bytes)in objects)if(oid.startsWith("state-refs:"))client.stateRefs(SyncV2Wire.parse(bytes,262144,true))
+        upload.currentWindow()
     }
     /** Transport progress is a separate authenticated-byte journal. It cannot authorize
      * business apply or edit deletion, and never changes the captured account plan. */
@@ -1127,9 +1128,23 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
     private fun markPublicationAttempted(action:JSONObject) {
         fault("before-publication-mark");syncFiles();checkActionCurrent(action)
         if(action.opt("publicationAttempted")==false) {
-            projection.accountWriter(action.getString("expectedStateVersion")){current->
-                if(!same(current.body.optJSONObject("pendingAccountAction"),action))SyncV2Codec.fail("choice_stale")
-                action.put("publicationAttempted",true).put("expectedStateVersion",SyncV2Codec.next(current.version))
+            // Refresh signatures only before the first send. A possibly sent request
+            // remains byte-identical so the server can replay its idempotency receipt.
+            val request = copy(action.getJSONObject("request"))
+            if (action.getString("kind") != "cloud") {
+                val time = now()
+                for (name in listOf("account", "device")) {
+                    val update = request.getJSONObject(name).getJSONObject("body")
+                    if (update.getLong("expiresAtMillis") - time > 30_000) continue
+                    request.put(name, SyncV2CloudClient.refUpdate(signer, identity.scope, update.getString("ref"),
+                        if (update.isNull("expectedOid")) null else update.getString("expectedOid"),
+                        update.getString("expectedRevision"), update.getString("newCommitOid"),
+                        update.getString("requestId"), time))
+                }
+            }
+            projection.accountWriter(action.getString("expectedStateVersion")) { current ->
+                if (!same(current.body.optJSONObject("pendingAccountAction"), action)) SyncV2Codec.fail("choice_stale")
+                action.put("request",request).put("publicationAttempted",true).put("expectedStateVersion",SyncV2Codec.next(current.version))
                 current.body.put("pendingAccountAction",copy(action))
             }
         }
@@ -1159,10 +1174,11 @@ internal class SyncV2AccountActions(private val client:SyncV2CloudClient,private
                 val known=client.requestResult(id)
                 if(known.getString("status")=="succeeded")known.getJSONObject("response")else {
                     SyncV2ChoiceDiagnostics.at("resume.upload") {
-                        upload(if(kind=="rollback")objects.selectObjects{it==request.getJSONObject("account").getJSONObject("body").getString("newCommitOid")}else objects,id)
+                        upload(if(kind=="rollback")objects.selectObjects{it==request.getJSONObject("account").getJSONObject("body").getString("newCommitOid")}else objects,id,
+                            ChoiceCapture.restore(action.getJSONObject("capture")))
                     }
                     markPublicationAttempted(action)
-                    SyncV2ChoiceDiagnostics.at("resume.publish") { client.publish(request) }
+                    SyncV2ChoiceDiagnostics.at("resume.publish") { client.publish(action.getJSONObject("request")) }
                 }
             }
         }catch(e:SyncV2CloudError){

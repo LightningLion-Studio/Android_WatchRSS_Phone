@@ -14,6 +14,8 @@ import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Exception
 import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2Wire
 import com.lightningstudio.watchrss.phone.connection.bluetooth.b2.B2TransferObserver
 import com.lightningstudio.watchrss.phone.connection.bluetooth.isTerminalAccountSyncFailure
+import com.lightningstudio.watchrss.phone.connection.bluetooth.watchAppVersion
+import com.lightningstudio.watchrss.phone.connection.bluetooth.watchAppVersionCode
 import com.lightningstudio.watchrss.phone.features.FeatureRegistry
 import com.lightningstudio.watchrss.phone.rollout.B2Cohort
 import com.lightningstudio.watchrss.phone.rollout.B2RolloutDecision
@@ -86,6 +88,8 @@ internal class BtSyncSession(
     @Volatile var protocol = BtSyncProtocol.NONE
     var decision = B2RolloutDecision(false, B2Cohort.INELIGIBLE, 0)
     private var peer: JSONObject? = null
+    private var watchVersion: String? = null
+    internal var failureDiagnostic: (suspend (BtSyncStage, BtSyncError, String?, Int?) -> Unit)? = null
     private var wireBytes: Long? = null
     private var disconnects = 0
     private var resumed = trigger == BtSyncTrigger.RESUME
@@ -101,15 +105,11 @@ internal class BtSyncSession(
     @Synchronized
     fun observePeer(probe: JSONObject) {
         if (peer != null || probe.opt("success") != true) return
+        watchVersion = watchAppVersion(probe)
         val details = probe.optJSONObject("watchCapabilities")
-        val version = probe.opt("appVersionCode") ?: details?.opt("appVersionCode")
         val model = (details?.opt("model") ?: probe.opt("model")) as? String
         peer = JSONObject().put("platform", "watch")
-            .put("appVersionCode", when (version) {
-                is Int -> version.takeIf { it >= 0 } ?: JSONObject.NULL
-                is Long -> version.takeIf { it in 0..Int.MAX_VALUE.toLong() } ?: JSONObject.NULL
-                else -> JSONObject.NULL
-            })
+            .put("appVersionCode", watchAppVersionCode(probe) ?: JSONObject.NULL)
             .put("model", telemetryLabel(model) ?: JSONObject.NULL)
     }
 
@@ -238,7 +238,7 @@ internal class BtSyncSession(
     suspend fun finishCancelledIfOpen() = finish("cancelled", stage, BtSyncError.CANCELLED)
 
     private suspend fun finish(result: String, failureStage: BtSyncStage?, error: BtSyncError?) {
-        val event = synchronized(this) {
+        val (event, peerVersion) = synchronized(this) {
             if (finished) return
             finished = true
             val transfer = JSONObject()
@@ -273,7 +273,11 @@ internal class BtSyncSession(
                 .put("errorCode", error?.wire ?: JSONObject.NULL)
                 .put("durationMs", (monotonic() - started).coerceAtLeast(0))
                 .put("transfer", transfer)
-                .put("kinds", JSONObject(kinds)))
+                .put("kinds", JSONObject(kinds))) to watchVersion
+        }
+        if (failureStage != null && error != null) {
+            val versionCode = event.data.optJSONObject("peer")?.optInt("appVersionCode", -1)?.takeIf { it >= 0 }
+            failureDiagnostic?.invoke(failureStage, error, peerVersion, versionCode)
         }
         record(event)
     }

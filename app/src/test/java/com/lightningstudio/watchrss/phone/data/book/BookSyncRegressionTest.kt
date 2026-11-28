@@ -261,9 +261,9 @@ class BookSyncRegressionTest {
             execSQL("DROP TABLE imported_books");execSQL("DROP TABLE imported_book_chapters");execSQL("DROP TABLE imported_book_reading");version=16
         }
         first.close()
-        val migrated=Room.databaseBuilder(context,PhoneCompanionDatabase::class.java,name).addMigrations(PhoneCompanionDatabase.MIGRATION_16_17,PhoneCompanionDatabase.MIGRATION_17_18,PhoneCompanionDatabase.MIGRATION_18_19,PhoneCompanionDatabase.MIGRATION_19_20).allowMainThreadQueries().build()
+        val migrated=Room.databaseBuilder(context,PhoneCompanionDatabase::class.java,name).addMigrations(PhoneCompanionDatabase.MIGRATION_16_17,PhoneCompanionDatabase.MIGRATION_17_18,PhoneCompanionDatabase.MIGRATION_18_19,PhoneCompanionDatabase.MIGRATION_19_20,PhoneCompanionDatabase.MIGRATION_20_21).allowMainThreadQueries().build()
         try {
-            assertEquals(article,migrated.phoneArticleDao().getById("existing"));assertTrue(migrated.bookDao().all().isEmpty());assertEquals(20,migrated.openHelper.readableDatabase.version)
+            assertEquals(article,migrated.phoneArticleDao().getById("existing"));assertTrue(migrated.bookDao().all().isEmpty());assertEquals(21,migrated.openHelper.readableDatabase.version)
         } finally {migrated.close();context.deleteDatabase(name)}
     }
 

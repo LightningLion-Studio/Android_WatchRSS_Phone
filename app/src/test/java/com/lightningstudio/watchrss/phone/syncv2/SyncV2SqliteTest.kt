@@ -61,11 +61,11 @@ class SyncV2SqliteTest {
         sql.execSQL("INSERT INTO notes VALUES('note',NULL,'note','local','local','hash','ancestor','base',1,0,10,'old',0,0)")
         sql.execSQL("INSERT INTO note_conflicts VALUES('conflict','note','base','local','remote','peer',1,0)")
         val book=SyncV2Fixtures.vector("book-merge").getJSONArray("cases").getJSONObject(0).getJSONObject("left")
-        sql.execSQL("INSERT INTO imported_books VALUES(?,?,'hash',5)",arrayOf(book.getString("bookId"),book.toString()))
+        sql.execSQL("INSERT INTO imported_books(bookId,stateJson,packageSha256,packageBytes) VALUES(?,?,'hash',5)",arrayOf(book.getString("bookId"),book.toString()))
         val copy=JSONObject(SyncV2Fixtures.vector("book-merge").getJSONArray("cases").getJSONObject(0).getJSONObject("right").toString()).put("instanceId","ab".repeat(16))
         val copyId=SyncV2Codec.hex(SyncV2Codec.sha(SyncV2Codec.lp(SyncV2Codec.utf8("watchrss/book/instance-id/v1"),SyncV2Codec.utf8(copy.getString("fingerprint")),SyncV2Codec.utf8(copy.getString("instanceId")))))
         copy.put("bookId",copyId)
-        sql.execSQL("INSERT INTO imported_books VALUES(?,?,'hash',5)",arrayOf(copyId,copy.toString()))
+        sql.execSQL("INSERT INTO imported_books(bookId,stateJson,packageSha256,packageBytes) VALUES(?,?,'hash',5)",arrayOf(copyId,copy.toString()))
         val countsBefore=businessCounts(sql)
         val before=businessDigest(sql);val a=adapter(db);a.install()
         for(d in SyncV2Schema.domains)while(!a.scanPage(d.table).complete){}

@@ -121,7 +121,7 @@ class ReconnectMainSessionTest {
         assertEquals(2, requests.count { it == "syncLibrary:cursor" })
         assertEquals(2, requests.count { it == "syncLibrary:manifest" })
         assertEquals(1, requests.count { it == "syncSession:complete" })
-        assertEquals(20, db.openHelper.readableDatabase.version)
+        assertEquals(21, db.openHelper.readableDatabase.version)
     }
 
     @Test fun capablePeerExchangesBothCheckpointAcknowledgmentsBeforeSessionCompletion() = runBlocking<Unit> {

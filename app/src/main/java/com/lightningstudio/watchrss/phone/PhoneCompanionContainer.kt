@@ -113,7 +113,8 @@ class PhoneCompanionContainer(context: Context) {
             PhoneCompanionDatabase.MIGRATION_16_17,
             PhoneCompanionDatabase.MIGRATION_17_18,
             PhoneCompanionDatabase.MIGRATION_18_19,
-            PhoneCompanionDatabase.MIGRATION_19_20
+            PhoneCompanionDatabase.MIGRATION_19_20,
+            PhoneCompanionDatabase.MIGRATION_20_21
         )
             .addCallback(NoteEditorPreferenceMigration)
             .addCallback(PhoneCompanionDatabase.ARTICLE_PROVENANCE_CALLBACK)

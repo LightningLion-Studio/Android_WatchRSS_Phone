@@ -10,7 +10,8 @@ import org.json.*
 import java.security.MessageDigest
 
 @Entity(tableName="imported_books")
-data class BookEntity(@PrimaryKey val bookId:String,val stateJson:String,val packageSha256:String="",val packageBytes:Long=0)
+data class BookEntity(@PrimaryKey val bookId:String,val stateJson:String,val packageSha256:String="",val packageBytes:Long=0,
+    @ColumnInfo(defaultValue = "NULL") val sourceUrl:String?=null)
 @Entity(tableName="imported_book_chapters",primaryKeys=["bookId","chapterIndex"],indices=[Index(value=["articleId"],unique=true)])
 data class BookChapterEntity(val bookId:String,val chapterIndex:Int,val articleId:String)
 @Entity(tableName="imported_book_reading",primaryKeys=["bookId","chapterIndex"])
@@ -18,13 +19,13 @@ data class BookReadingEntity(val bookId:String,val chapterIndex:Int,val stateJso
 data class BookSourceRef(val bookId:String,val sourceUrl:String)
 // Keep ordinary reads in one indexed query. Large values bypass CursorWindow
 // by fetching bounded text slices in the same Room read transaction.
-private const val BOOK_STATE_COLUMNS = "bookId,packageSha256,packageBytes,"
+private const val BOOK_STATE_COLUMNS = "bookId,packageSha256,packageBytes,sourceUrl,"
 private const val BOOK_READING_COLUMNS = "bookId,chapterIndex,"
 internal const val SMALL_BOOK_JSON =
     "CASE WHEN length(CAST(stateJson AS BLOB)) <= 262144 THEN stateJson ELSE '' END AS stateJson"
 internal const val BOOK_JSON_SLICE = 65536
 
-internal suspend fun readBookJson(read: suspend (offset: Int) -> String): String = buildString {
+internal inline fun readBookJson(read: (offset: Int) -> String): String = buildString {
     var offset = 1
     while (true) {
         val slice = read(offset)
@@ -32,6 +33,25 @@ internal suspend fun readBookJson(read: suspend (offset: Int) -> String): String
         val codePoints = slice.codePointCount(0, slice.length)
         if (codePoints < BOOK_JSON_SLICE) break
         offset += codePoints
+    }
+}
+
+internal fun bookSourceUrl(state: JSONObject): String? = state.opt("sourceUrl") as? String
+
+internal fun bookSourceUrl(raw: String): String? = try {
+    bookSourceUrl(JSONObject(raw))
+} catch (_: JSONException) {
+    null
+}
+
+internal fun readStoredBookJson(
+    query: (String, Array<String>) -> android.database.Cursor,
+    id: String,
+    smallJson: String
+): String = smallJson.ifEmpty {
+    readBookJson { offset ->
+        query("SELECT substr(stateJson,?,65536) FROM imported_books WHERE bookId=?",
+            arrayOf(offset.toString(), id)).use { if (it.moveToFirst()) it.getString(0) else "" }
     }
 }
 
@@ -75,7 +95,10 @@ internal suspend fun readBookJson(read: suspend (offset: Int) -> String): String
     @Query("SELECT " + BOOK_STATE_COLUMNS + SMALL_BOOK_JSON + " FROM imported_books WHERE bookId=:id")
     suspend fun bookHeader(id: String): BookEntity?
     @Transaction suspend fun get(id: String): BookEntity? = bookHeader(id)?.let { completeBook(it) }
-    @Upsert suspend fun put(value:BookEntity)
+    @Upsert suspend fun upsertBook(value:BookEntity)
+    suspend fun put(value:BookEntity) = upsertBook(value.copy(
+        sourceUrl = bookSourceUrl(value.stateJson)
+    ))
     @Query("SELECT * FROM imported_book_chapters ORDER BY bookId,chapterIndex") suspend fun chapters():List<BookChapterEntity>
     @Query("SELECT * FROM imported_book_chapters WHERE bookId=:id ORDER BY chapterIndex") suspend fun chapters(id:String):List<BookChapterEntity>
     @Query("SELECT * FROM imported_book_chapters WHERE articleId=:id LIMIT 1") suspend fun chapterByArticle(id:String):BookChapterEntity?

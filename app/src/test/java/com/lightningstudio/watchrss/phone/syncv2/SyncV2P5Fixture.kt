@@ -25,12 +25,15 @@ internal class SyncV2P5Fixture(private val lifetime:SyncV2Lifetime?=null,
         lifetime=lifetime,fault=projectionFault,
         resetSources=if(reset) SyncV2ResetSources(sql,identity.scopeJson,"",null,root,File(root,"reset-depot")) else null
     ).also{it.install()}
-    val headers=linkedMapOf<String,JSONObject>();val refs=linkedMapOf<String,JSONObject>()
-    val results=mutableMapOf<String,JSONObject>();val requests=mutableListOf<String>()
+    val headers=linkedMapOf<String,JSONObject>();val refs=java.util.concurrent.ConcurrentHashMap<String,JSONObject>()
+    val results=mutableMapOf<String,JSONObject>();val requests=java.util.Collections.synchronizedList(mutableListOf<String>())
     var current=JSONObject();var deviceOid:String?=null;var deviceRevision="0"
     var selectedLocalRevision:String?=null;var choiceCalls=0;var publishCalls=0;var ackCalls=0;var historyCalls=0;var flags=true;var indexWrite=true;var drop=false;var ackFailure=false
     var onConfirm:(()->Unit)?=null;var afterCloudConfirmation:((JSONObject)->Unit)?=null;var historyExpired=false;var snapshotExpired=false
-    private val totals=mutableMapOf<String,Int>()
+    private val totals=java.util.concurrent.ConcurrentHashMap<String,Int>()
+    var windowId = "12".repeat(16)
+    var uploadHook: ((String) -> MockResponse?)? = null
+    var enforcePublishExpiry = false
     var target:String;val initial:String
     /** C7 hook: rewrites one entity's state wire before it is sealed (e.g. declares a feature to isolate it). */
     var stateHook:((String,JSONObject)->Unit)?=null
@@ -48,7 +51,7 @@ internal class SyncV2P5Fixture(private val lifetime:SyncV2Lifetime?=null,
         f.route={request->
             val route=request.requestUrl!!.encodedPath.substringAfter("/functions/v1/sync/v2/");requests.add(route)
             fun body()=SyncV2Wire.parse(request.body.readByteArray())
-            when {
+            uploadHook?.invoke(route) ?: when {
                 route=="capabilities"->f.response(f.dto().put("minVersion",2).put("maxVersion",2).put("maxPartBytes",65536).put("historyDays",7).put("features",if(noteSegmentsAnnounced)JSONArray().put(SyncV2NoteSegments.feature)else JSONArray())
                     .put("receiptKeyId",f.bootstrap.get("receiptKeyId")).put("receiptSigningPublicKey",f.bootstrap.get("receiptSigningPublicKey"))
                     .put("flags",JSONObject().put("read",true).put("indexWrite",indexWrite).put("contentWrite",true).put("historyRestore",flags)))
@@ -80,7 +83,9 @@ internal class SyncV2P5Fixture(private val lifetime:SyncV2Lifetime?=null,
                 route=="acks/applied"->{ackCalls++;if(ackFailure)error("temporarily_unavailable",503)else f.response(f.dto().put("accepted",true).put("serverRevision",current.get("revision")))}
                 route=="account/publish"->{
                     val b=body();publishCalls++;onConfirm?.invoke();val a=b.getJSONObject("account").getJSONObject("body");val d=b.getJSONObject("device").getJSONObject("body");val requestId=a.getString("requestId");val old=results[requestId]
-                    if(old!=null)f.response(old)else if(a.getString("expectedOid")!=current.getString("commitOid") || a.getString("expectedRevision")!=current.getString("revision"))error("ref_conflict",409)
+                    if(old!=null)f.response(old)
+                    else if(enforcePublishExpiry && minOf(a.getLong("expiresAtMillis"),d.getLong("expiresAtMillis"))<f.now)error("invalid_schema",400)
+                    else if(a.getString("expectedOid")!=current.getString("commitOid") || a.getString("expectedRevision")!=current.getString("revision"))error("ref_conflict",409)
                     else {
                         val oid=a.getString("newCommitOid");val h=SyncV2Wire.parse(f.objects.getValue(oid),262144,true);SyncV2HeadPins.validateBody(h.getJSONObject("body"));headers[oid]=h
                         setCurrent(oid,SyncV2Codec.next(current.getString("revision")));deviceRevision=SyncV2Codec.next(d.getString("expectedRevision"));deviceOid=oid
@@ -90,13 +95,15 @@ internal class SyncV2P5Fixture(private val lifetime:SyncV2Lifetime?=null,
                 }
                 route=="objects/reserve"->{val b=body();val list=b.getJSONArray("objects");for(i in 0 until list.length())totals[list.getJSONObject(i).getString("oid")]=list.getJSONObject(i).getInt("totalBytes")
                     f.response(f.dto().put("reservationId","44".repeat(16)).put("expiresAtMillis",f.now+600000).put("reservedBytes",0).put("objects",list.also{for(i in 0 until it.length())it.getJSONObject(i).put("durableOffset",0)}))}
-                route=="objects/have-want"->{val b=body();val list=b.getJSONArray("oids");val entries=JSONArray()
+                route=="objects/have-want"->{val b=body();check(b.getString("windowId")==windowId);val list=b.getJSONArray("oids");val entries=JSONArray()
                     for(i in 0 until list.length()) {
-                        val oid=list.getString(i);val bytes=f.objects[oid];val partial=f.prefix[oid];val offset=bytes?.size?:partial?.size?:0;val total=bytes?.size?:totals[oid]
+                        val oid=list.getString(i);val partial=f.prefix[oid]
+                        val bytes=f.objects[oid] ?: partial?.takeIf { it.size == totals[oid] }?.also { f.objects[oid] = it }
+                        val offset=bytes?.size?:partial?.size?:0;val total=bytes?.size?:totals[oid]
                         entries.put(JSONObject().put("oid",oid).put("status",if(bytes!=null)"present"else if(offset>0)"partial"else"missing").put("totalBytes",if(offset==0)JSONObject.NULL else total).put("durableOffset",offset).put("receipt",if(offset==0)JSONObject.NULL else f.receipt(oid,total!!,offset)))
                     }
                     f.response(f.dto().put("windowId",b.get("windowId")).put("objects",entries))}
-                route.startsWith("objects/") && "/parts/" in route->{val oid=route.substringAfter("objects/").substringBefore("/parts/");val off=route.substringAfter("/parts/").toInt();val raw=request.body.readByteArray();f.putOids.add(oid);f.putOffsets.add(off);check(off==(f.prefix[oid]?.size?:0));f.prefix[oid]=(f.prefix[oid]?:byteArrayOf())+raw
+                route.startsWith("objects/") && "/parts/" in route->{val oid=route.substringAfter("objects/").substringBefore("/parts/");val off=route.substringAfter("/parts/").toInt();val raw=request.body.readByteArray();f.recordPart(oid, off);check(off==(f.prefix[oid]?.size?:0));f.prefix[oid]=(f.prefix[oid]?:byteArrayOf())+raw
                     f.response(f.dto().put("oid",oid).put("durableOffset",off+raw.size).put("receipt",f.receipt(oid,totals.getValue(oid),off+raw.size)))}
                 route.startsWith("objects/") && route.endsWith("/complete")->{val oid=route.substringAfter("objects/").substringBefore("/complete");f.objects[oid]=f.prefix.getValue(oid);f.response(f.dto().put("oid",oid).put("receipt",f.receipt(oid,f.objects.getValue(oid).size,f.objects.getValue(oid).size)))}
                 route=="state-refs"->{val b=body();val value=b.getJSONObject("body");val oid=SyncV2Codec.oid("state-refs",b);f.objects[oid]=SyncV2Codec.utf8(SyncV2Codec.canonical(b));refs[value.getString("stateOid")]=mapping(value.getString("stateOid"),oid,f.objects.getValue(oid).size);f.response(f.dto().put("accepted",true))}
@@ -111,7 +118,7 @@ internal class SyncV2P5Fixture(private val lifetime:SyncV2Lifetime?=null,
         val mapping=JSONObject().put("scope",identity.scope).put("deviceId",f.signer.deviceId).put("keyId",f.signer.keyId).put("legacyDeviceId","synthetic-phone").put("approvalRevision","1")
         return identity.signingBinding(f.signer,signingRegisteredAt,"0").put("deviceMapping",f.signer.signed("wrss.sync.v2/device-mapping",mapping))
     }
-    fun window()=f.dto().put("windowId","12".repeat(16)).put("expiresAtMillis",f.now+300000).put("issuedAtMillis",f.now).put("serverRevision",current.getString("revision")).put("historyFloorRevision","0")
+    fun window()=f.dto().put("windowId",windowId).put("expiresAtMillis",f.now+300000).put("issuedAtMillis",f.now).put("serverRevision",current.getString("revision")).put("historyFloorRevision","0")
         .put("refs",JSONArray().also{if(deviceOid!=null)it.put(JSONObject().put("deviceId",f.signer.deviceId).put("commitOid",deviceOid).put("refRevision",deviceRevision))}).put("account",JSONObject(current.toString()))
     private fun mapping(parent:String,oid:String,size:Int)=JSONObject().put("scope",identity.scope).put("parentOid",parent).put("refsOid",oid).put("authorDeviceId",f.signer.deviceId).put("keyId",f.signer.keyId).put("totalBytes",size)
     fun note(title:String="title",markdown:String="base\nline\n")=JSONObject().put("noteId","note").put("folderId",JSONObject.NULL).put("title",title).put("markdown",markdown).put("plainText",markdown)

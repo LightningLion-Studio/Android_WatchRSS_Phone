@@ -26,6 +26,47 @@ class BleProjectionUpgradeTest {
     @Before fun registered()=runBlocking<Unit>{db.bookReadingDao().putRegistration(BookCaptureMetaEntity(checkedRevision=0))}
     @After fun close(){db.close();directory.deleteRecursively()}
 
+    @Test fun migrationBackfillsLargeBookSourcesAndRebuildsOldRssGuards() = runBlocking<Unit> {
+        val name = "ble-source-migration-${System.nanoTime()}"
+        val source = "https://watchrss.local/import-epub/migrated"
+        val raw = org.json.JSONObject().put("title", "附😀".repeat(100_000)).put("sourceUrl", source).toString()
+        try {
+            val prior = Room.databaseBuilder(context, PhoneCompanionDatabase::class.java, name)
+                .allowMainThreadQueries().build()
+            try {
+                val sql = prior.openHelper.writableDatabase
+                sql.execSQL("ALTER TABLE imported_books DROP COLUMN sourceUrl")
+                sql.execSQL("INSERT INTO imported_books VALUES(?,?,?,?)", arrayOf("legacy", raw, "", 0))
+                sql.execSQL("CREATE TRIGGER ble_fast_phone_rss_sources_books_INSERT AFTER INSERT ON phone_rss_sources " +
+                    "WHEN legacy_json_function(NEW.url) BEGIN SELECT 1; END")
+                sql.version = 20
+            } finally {
+                prior.close()
+            }
+
+            val upgraded = Room.databaseBuilder(context, PhoneCompanionDatabase::class.java, name)
+                .addMigrations(PhoneCompanionDatabase.MIGRATION_20_21).allowMainThreadQueries().build()
+            try {
+                val book = upgraded.bookDao().get("legacy")!!
+                assertEquals(source, book.sourceUrl)
+                assertEquals(raw, book.stateJson)
+                upgraded.bookReadingDao().putRegistration(BookCaptureMetaEntity(checkedRevision = 0))
+                val migratedStore = BleDomainStore(upgraded, directory)
+                val before = migratedStore.roots("account")
+                upgraded.phoneRssSourceDao().upsert(PhoneRssSourceEntity(
+                    source, "phone", "title", "", null, null, 1, 1, 1, false, false, 0
+                ))
+                val after = migratedStore.roots("account")
+                assertEquals(before["library"], after["library"])
+                assertNotEquals(before["books"], after["books"])
+            } finally {
+                upgraded.close()
+            }
+        } finally {
+            context.deleteDatabase(name)
+        }
+    }
+
     @Test fun previewGuardUpgradeInvalidatesLegacyBodyAvailabilityCache()=runBlocking<Unit> {
         val source=com.lightningstudio.watchrss.phone.data.model.ImportedContentIds.ROOT_SOURCE_URL
         val text="合成正文".repeat(1000);val preview=text.take(280)

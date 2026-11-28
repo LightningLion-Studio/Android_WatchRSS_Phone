@@ -161,7 +161,7 @@ class SyncV2BookProvenanceTest {
         val db = fixture.sql
         db.beginTransaction()
         try {
-            db.execSQL("INSERT INTO imported_books VALUES(?,?,'hash',1)", arrayOf(id, book.toString()))
+            db.execSQL("INSERT INTO imported_books(bookId,stateJson,packageSha256,packageBytes) VALUES(?,?,'hash',1)", arrayOf(id, book.toString()))
             db.compileStatement("INSERT INTO imported_book_chapters(bookId,chapterIndex,articleId) VALUES(?,?,?)").use { insert ->
                 insert.bindString(1, id)
                 for (i in count downTo 1) {

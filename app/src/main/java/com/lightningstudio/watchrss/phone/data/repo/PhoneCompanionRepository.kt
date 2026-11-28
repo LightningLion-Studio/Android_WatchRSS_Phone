@@ -1478,10 +1478,10 @@ class PhoneCompanionRepository(
             .toList()
         if (candidates.isEmpty()) return
 
-        val loggedChangedAt = syncChangeLogDao.maxChangedAtByEntityIds(
-            kind = SYNC_KIND_ARTICLE,
-            entityIds = candidates.map { it.articleId }
-        ).associate { it.entityId to it.changedAt }
+        val loggedChangedAt = candidates.map { it.articleId }
+            .chunked(SYNC_ID_QUERY_BATCH_SIZE)
+            .flatMap { syncChangeLogDao.maxChangedAtByEntityIds(SYNC_KIND_ARTICLE, it) }
+            .associate { it.entityId to it.changedAt }
         val now = System.currentTimeMillis()
         candidates.forEach { article ->
             val changedAt = article.latestOperationAt()

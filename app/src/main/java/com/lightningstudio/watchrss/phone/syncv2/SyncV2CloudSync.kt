@@ -322,36 +322,16 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
             .put("operation",JSONObject().put("kind","normal").put("rollbackTarget",JSONObject.NULL).put("resolvesGeneration",JSONObject.NULL))
         val signed=signer.commit(body);val oid=SyncV2Codec.oid("commit",body)
         val objects = objectOverlay(uploadObjects, mapOf(oid to SyncV2Codec.utf8(SyncV2Codec.canonical(signed))))
-        // Each reservation is bounded. Control upload never requests a content slot.
         val toUpload = objects.keys.filter {
-            it.substringBefore(':') in setOf("meta","state","tree","commit") && !projection.cloudObjectExists(it)
-        }.sorted().map { key -> object: Map.Entry<String, ByteArray> {
-            override val key = key
-            override val value get() = objects.getValue(key)
-        } }
-        for(batch in toUpload.chunked(64)) {
-            val reserve=client.reserve(randomId(),batch.map{it.key to it.value.size});val reservation=reserve.getString("reservationId")
-            // C11 also applies to control objects: only a current authenticated status
-            // query may establish an offset, never an idempotent reserve response.
-            val entries=client.verifiedHaveWant(window.getString("windowId"),batch.map{it.key to it.value.size},now())
-            for(item in batch) {
-                val prior=entries.getValue(item.key)
-                if(prior.getString("status")=="present")continue
-                var offset=SyncV2Wire.uint(prior,"durableOffset",item.value.size.toLong()).toInt()
-                if(offset%65536!=0 && offset!=item.value.size)SyncV2Codec.fail("invalid_schema")
-                while(offset<item.value.size) {
-                    val part=item.value.copyOfRange(offset,minOf(offset+65536,item.value.size))
-                    val response=client.put(item.key,offset,reservation,randomId(),part)
-                    if(response.getString("oid")!=item.key || SyncV2Wire.uint(response,"durableOffset")!=(offset+part.size).toLong())SyncV2Codec.fail("invalid_schema")
-                    client.verifyReceipt(response.getJSONObject("receipt"),item.key,item.value.size.toLong(),(offset+part.size).toLong(),now())
-                    offset+=part.size
-                }
-                val complete=client.complete(item.key,reservation,randomId(),item.value.size)
-                client.verifyReceipt(complete.getJSONObject("receipt"),item.key,item.value.size.toLong(),item.value.size.toLong(),now())
-            }
-        }
-        for(ref in reachableRefs)if(!projection.cloudObjectExists(SyncV2Codec.oid("state-refs",ref)))client.stateRefs(ref)
-        fresh(window)
+            it.substringBefore(':') in setOf("meta", "state", "tree", "commit") && !projection.cloudObjectExists(it)
+        }.sorted()
+        val upload = SyncV2ControlUpload(client, if (account.isNull("commitOid")) null else account.getString("commitOid"),
+            account.getString("revision"), account.getString("rollbackGeneration"),
+            now, ::randomId, "ref_conflict", window)
+        upload.objects(toUpload, objects::getValue)
+        val refsToUpload = reachableRefs.filterNot { projection.cloudObjectExists(SyncV2Codec.oid("state-refs", it)) }
+        client.parallelControlUpload(refsToUpload) { client.stateRefs(it) }
+        fresh(upload.currentWindow())
         val publishState=projection.state()
         if(publishState.revision!=st.revision)SyncV2Codec.fail("choice_stale")
         val id=randomId();val old=if(account.isNull("commitOid"))null else account.getString("commitOid")

@@ -85,7 +85,8 @@ internal fun installCloudLocalChanges(db:SupportSQLiteDatabase) {
                 check(columns.isNotEmpty()) { "cloud_change_counter_missing_table:$table" }
                 for(op in listOf("INSERT","UPDATE","DELETE")) {
                     val name="cloud_local_change_${table}_${op.lowercase()}"
-                    val changes=columns.filterNot { table=="phone_articles" && it in setOf("syncBodyHash","syncBodyByteCount","syncChunkSize","syncChunkHashesJson","syncMetadataHash") }
+                    val changes=columns.filterNot { (table == "imported_books" && it == "sourceUrl") ||
+                            (table == "phone_articles" && it in setOf("syncBodyHash","syncBodyByteCount","syncChunkSize","syncChunkHashesJson","syncMetadataHash")) }
                     val guard=if(op=="UPDATE")" WHEN "+changes.joinToString(" OR "){"OLD.`$it` IS NOT NEW.`$it`"} else ""
                     val pending=if(table=="article_register_provenance") {
                         val alias=if(op=="DELETE")"OLD" else "NEW"

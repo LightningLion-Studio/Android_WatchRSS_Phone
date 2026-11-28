@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.lightningstudio.watchrss.phone.PhoneCompanionApplication
 import com.lightningstudio.watchrss.phone.account.AccountEnvironment
 import com.lightningstudio.watchrss.phone.account.PhoneAccountSession
+import com.lightningstudio.watchrss.phone.connection.bluetooth.WatchDebugLogForegroundRestricted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -44,9 +45,11 @@ class SupportViewModel internal constructor(
     internal var uploadLogs: suspend (String, (String) -> Unit) -> String = { text, progress -> SupportLogUploader(application).upload(text, progress) }
     internal var collectLogs: suspend () -> Pair<String, String> = {
         val app = application as PhoneCompanionApplication
+        var watchHint: String? = null
         val watch = kotlinx.coroutines.withTimeoutOrNull(12_000) {
             try { app.container.bluetoothSyncManager.collectWatchDebugLog().text }
             catch (e: CancellationException) { throw e }
+            catch (e: WatchDebugLogForegroundRestricted) { watchHint = e.message; null }
             catch (_: Exception) { null }
         }
         val phone = withContext(Dispatchers.IO) {
@@ -55,7 +58,8 @@ class SupportViewModel internal constructor(
             finally { process.destroy() }
         }
         val text = withContext(Dispatchers.IO) { app.container.bluetoothDebugLog.snapshot(watch) + "\n===== Phone application log =====\n" + phone }
-        redactSupportLog(text) to if (watch == null) "未能读取手表日志，本次上传了手机诊断日志。" else "已包含手机和手表诊断日志。"
+        redactSupportLog(text) to if (watch == null) "本次上传了手机诊断日志。" +
+            (watchHint ?: "未能读取手表日志。") else "已包含手机和手表诊断日志。"
     }
 
     fun declineLogs(id: String) {

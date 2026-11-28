@@ -74,8 +74,11 @@ class SyncV2P6ProductTest {
             AlgorithmIdentifier(ASN1ObjectIdentifier("1.2.840.10045.2.1"),ASN1ObjectIdentifier("1.2.840.10045.3.1.7")),SyncV2Codec.unhex(receipt.publicHex,65)).encoded))
         var descriptor:JSONObject?=null;var capsule:JSONObject?=null
         var readGate=true;var descriptorUnavailable=false;var failAfterConflict=false;var dropInit=false;val initBytes=mutableListOf<String>()
-        val objects=linkedMapOf<String,ByteArray>();val prefixes=linkedMapOf<String,ByteArray>();val totals=linkedMapOf<String,Int>()
-        val bindings=linkedMapOf<String,JSONObject>();val refs=linkedMapOf<String,JSONObject>();val devices=linkedMapOf<String,JSONObject>();val results=linkedMapOf<String,JSONObject>()
+        val objects = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
+        val prefixes = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
+        val totals = java.util.concurrent.ConcurrentHashMap<String, Int>()
+        val refs = java.util.concurrent.ConcurrentHashMap<String, JSONObject>()
+        val bindings=linkedMapOf<String,JSONObject>();val devices=linkedMapOf<String,JSONObject>();val results=linkedMapOf<String,JSONObject>()
         val boundAliases=linkedMapOf<String,String>();val registrationBodies=mutableListOf<JSONObject>()
         var negotiateStepMillis=0L;var timeOffsetMillis=0L;var expiredNegotiate=false;var checkpoints=0
         var account=JSONObject().put("commitOid",JSONObject.NULL).put("revision","0").put("rollbackGeneration","0")

@@ -282,7 +282,7 @@ class SyncV2MissingOriginalTest {
     }
 
     private fun SyncV2P5Fixture.insert(book: JSONObject, original: ByteArray? = null) {
-        sql.execSQL("INSERT INTO imported_books VALUES(?,?,?,?)", arrayOf(book.getString("bookId"), book.toString(),
+        sql.execSQL("INSERT INTO imported_books(bookId,stateJson,packageSha256,packageBytes) VALUES(?,?,?,?)", arrayOf(book.getString("bookId"), book.toString(),
             original?.let { SyncV2Codec.hex(SyncV2Codec.sha(it)) }.orEmpty(), original?.size ?: 0))
     }
 

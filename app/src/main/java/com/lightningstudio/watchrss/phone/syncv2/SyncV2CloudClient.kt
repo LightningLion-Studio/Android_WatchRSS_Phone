@@ -232,7 +232,9 @@ internal class SyncV2CloudClient(
 
     private fun <T> execute(call: okhttp3.Call, read: (okhttp3.Response) -> T): T {
         val round = roundCancellation.get()
-        return if (round != null) round.execute(call, read) else call.execute().use(read)
+        fun executeRound() = if (round != null) round.execute(call, read) else call.execute().use(read)
+        val worker = uploadCancellation.get()
+        return if (worker != null) worker.track(call, ::executeRound) else executeRound()
     }
 
     /** Same authenticated origin, ownership fence, cancellation and deadline; separate byte namespace. */
@@ -319,6 +321,34 @@ internal class SyncV2CloudClient(
     }
     fun verifyReceipt(value:JSONObject,oid:String,total:Long,offset:Long,now:Long) = serviceTrust.receipt(value,scope,oid,total,offset,now)
     fun complete(oid:String,reservation:String,request:String,total:Int)=post("objects/$oid/complete",JSONObject().put("reservationId",reservation).put("requestId",request).put("totalBytes",total))
+    /** Bounded control workers share the round's deadline and also cancel sibling calls on failure. */
+    fun <T> parallelControlUpload(items: List<T>, upload: (T) -> Unit) {
+        if (items.size <= 1) {
+            items.forEach(upload)
+            return
+        }
+        val context = bodyUploadContext()
+        val workers = minOf(items.size, 8)
+        runBlocking {
+            (0 until workers).map { worker ->
+                async(Dispatchers.IO + context) {
+                    CloudCallCancellation.run { cancellation ->
+                        uploadCancellation.set(cancellation)
+                        try {
+                            for (index in worker until items.size step workers) {
+                                cancellation.checkActive()
+                                roundCancellation.get()?.checkActive()
+                                upload(items[index])
+                            }
+                        } finally {
+                            uploadCancellation.remove()
+                        }
+                    }
+                }
+            }.awaitAll()
+        }
+    }
+
     fun stateRefs(value:JSONObject):JSONObject = post("state-refs",value)
     fun recipeRefs(value:JSONObject)=post("recipe-refs",value)
     fun custody(value:JSONObject)=post("availability/custody",value)
@@ -428,6 +458,7 @@ internal class SyncV2CloudClient(
     }
     companion object {
         // Parallel body uploads carry this scope and the execution deadline to each worker.
+        private val uploadCancellation = ThreadLocal<CloudCallCancellation>()
         private val roundCancellation = ThreadLocal<CloudCallCancellation>()
         private const val REFERENCE_CONCURRENCY = 6
 

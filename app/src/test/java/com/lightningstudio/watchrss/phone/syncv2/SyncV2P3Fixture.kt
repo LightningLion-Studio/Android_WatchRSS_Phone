@@ -18,7 +18,10 @@ internal class SyncV2P3Fixture:AutoCloseable {
     val signer=SyncV2Signing.fromPrivate(ByteArray(31)+byteArrayOf(1),"aa".repeat(16),"ab".repeat(16))
     val objects=ConcurrentHashMap<String,ByteArray>()
     val prefix=ConcurrentHashMap<String,ByteArray>()
-    val putOffsets=mutableListOf<Int>();val putOids=mutableListOf<String>()
+    private val controlParts = java.util.concurrent.ConcurrentLinkedQueue<Pair<String, Int>>()
+    val putOffsets get() = controlParts.map { it.second }
+    val putOids get() = controlParts.map { it.first }
+    fun recordPart(oid: String, offset: Int) { controlParts.add(oid to offset) }
     var completed=0;var ranges=0;var dropAck=false;var busy=false;var wrongRange=false;var partDelay=0L
     var requests=0;var controlRequests=0
     var replayReserve=false
@@ -75,7 +78,7 @@ internal class SyncV2P3Fixture:AutoCloseable {
             }
             if(path.startsWith("objects/") && "/parts/" in path) {
                 val oid=path.substringAfter("objects/").substringBefore("/parts/");val offset=path.substringAfter("/parts/").toInt()
-                val bytes=request.body.readByteArray();putOffsets.add(offset);putOids.add(oid)
+                val bytes=request.body.readByteArray();recordPart(oid, offset)
                 if(partDelay>0)Thread.sleep(partDelay)
                 val prior=prefix[oid]?:ByteArray(0)
                 if(offset<prior.size)check(offset+bytes.size<=prior.size && prior.copyOfRange(offset,offset+bytes.size).contentEquals(bytes))

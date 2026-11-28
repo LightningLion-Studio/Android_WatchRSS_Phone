@@ -126,7 +126,7 @@ class SyncV2P5LegacyActionsTest {
             assertArrayEquals(staged.readBytes(), stored)
             val recovery = SyncV2RecoveryStorage(w.projection, w.identity, w.root)
             assertFalse(recovery.guardedAlreadyPresent(link))
-            w.sql.execSQL("INSERT INTO imported_books VALUES(?,?,?,?)", arrayOf<Any>(id, state.toString(), hash, raw.size))
+            w.sql.execSQL("INSERT INTO imported_books(bookId,stateJson,packageSha256,packageBytes) VALUES(?,?,?,?)", arrayOf<Any>(id, state.toString(), hash, raw.size))
             val original = BookPackageFiles.legacy(File(w.root, "imported_books"), id)
             original.parentFile!!.mkdirs()
             original.writeBytes(raw)

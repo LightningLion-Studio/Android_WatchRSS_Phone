@@ -5,6 +5,9 @@ import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.util.Log
+import com.lightningstudio.watchrss.phone.BuildConfig
+import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncError
+import com.lightningstudio.watchrss.phone.data.telemetry.BtSyncStage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -56,14 +59,14 @@ class BluetoothDebugLog(context: Context) {
         }
         // Release timing evidence without exporting bodies, tokens, account IDs or Bluetooth addresses.
         val timingKeys=setOf("action","phase","label","elapsedMs","wireBytes","prepareMs","bookPrepareMs","rootCount","remoteRootCount","missingRemote","retryDomains","localChanged","remoteChanged","errorClass","readerError","phoneMissing","watchMissing","skipped","domains","actualChanges","sourceTag","changedFields","localClock","remoteClock","localOrder","remoteOrder","articlesMerged","sourcesMerged","booksApplied","localApplied","notesPhone","notesWatch","appliedOnWatch","appliedOnPhone","bluetoothOnly","stage","deltaArticles","fullArticles","deltaSources","fullSnapshot","fallbackReason","sentArticles","sentSources","merged","mergedSources","received","sourcesReceived","applied","count","success","attempt","delayMs","elapsedNanos",
-            "unit","generation","monotonicMillis","consecutiveFailures","priorNoProgress","stageElapsedMs")
+            "unit","generation","monotonicMillis","consecutiveFailures","priorNoProgress","stageElapsedMs","failureStage")
         if(event.startsWith("sync.") || event.startsWith("bt.frame.") || event.startsWith("bt.socket.") ||
             event.startsWith("bt.library.probe.") || event.startsWith("library.reconnect.") ||
             event == "library.connection.interrupted") {
             Log.i("WatchRSSBluetooth",buildString {
                 append("monotonicNanos=$elapsedNanos event=$event")
                 if(sessionId!=null)append(" session=$sessionId")
-                fields.filterKeys{(event=="sync.book.isolated" && it in setOf("kind","id","bookIdPrefix","code","title","reason"))||it in timingKeys||it.endsWith("Action")||it.endsWith("Phase")||it.endsWith("Version")}.forEach{(key,value)->append(" $key=${value.formatValue()}")}
+                fields.filterKeys{(event=="sync.book.isolated" && it in setOf("kind","id","bookIdPrefix","code","title","reason"))||(event in setOf("sync.debugLog.collection", "sync.diagnostic.failure") && it in setOf("errorCode", "phoneAppVersionCode", "watchAppVersionCode"))||it in timingKeys||it.endsWith("Action")||it.endsWith("Phase")||it.endsWith("Version")}.forEach{(key,value)->append(" $key=${value.formatValue()}")}
             })
         }
         synchronized(lock) {
@@ -75,6 +78,37 @@ class BluetoothDebugLog(context: Context) {
             }
         }
     }
+
+    internal fun recordWatchLogCollection(stage: WatchLogStage, code: WatchLogCode, watchVersion: String?, watchVersionCode: Int? = null) {
+        appendEvent(
+            event = "sync.debugLog.collection",
+            fields = mapOf(
+                "failureStage" to stage.name.lowercase(),
+                "errorCode" to code.name.lowercase(),
+                "phoneAppVersion" to BuildConfig.VERSION_NAME,
+                "phoneAppVersionCode" to BuildConfig.VERSION_CODE,
+                "watchAppVersion" to safeAppVersion(watchVersion),
+                "watchAppVersionCode" to watchVersionCode?.takeIf { it >= 0 }
+            )
+        )
+    }
+
+    internal fun recordSyncFailure(stage: BtSyncStage, code: BtSyncError, watchVersion: String?, watchVersionCode: Int?) {
+        appendEvent(
+            event = "sync.diagnostic.failure",
+            fields = mapOf(
+                "failureStage" to stage.wire,
+                "errorCode" to code.wire,
+                "phoneAppVersion" to BuildConfig.VERSION_NAME,
+                "phoneAppVersionCode" to BuildConfig.VERSION_CODE,
+                "watchAppVersion" to safeAppVersion(watchVersion),
+                "watchAppVersionCode" to watchVersionCode?.takeIf { it >= 0 }
+            )
+        )
+    }
+
+    internal enum class WatchLogStage { PROBE, PULL, NONE }
+    internal enum class WatchLogCode { NO_WATCH, MULTIPLE_WATCHES, PROBE_FAILED, TRANSPORT_FAILED, FOREGROUND_RESTRICTED, PEER_REJECTED, CANCELLED, NONE }
 
     suspend fun exportTo(contentResolver: ContentResolver, uri: Uri, watchLog: String? = null): Long =
         withContext(Dispatchers.IO) {
@@ -100,6 +134,7 @@ class BluetoothDebugLog(context: Context) {
             appendLine("package=${appContext.packageName}")
             appendLine("device=${Build.MANUFACTURER} ${Build.MODEL}")
             appendLine("sdk=${Build.VERSION.SDK_INT}")
+            appendLine("phoneAppVersion=${BuildConfig.VERSION_NAME}")
             appendLine()
             append(body.ifBlank { "No Bluetooth debug entries recorded." })
             watchLog?.let {
@@ -149,6 +184,9 @@ class BluetoothDebugLog(context: Context) {
     }
 
     companion object {
+        private val appVersion = Regex("[0-9]{1,4}\\.[0-9]{1,4}\\.[0-9]{1,4}(?:-[0-9]{1,6})?")
+        internal fun safeAppVersion(value: String?): String? = value?.takeIf(appVersion::matches)
+
         private val sessionCounter = AtomicInteger(0)
 
         fun newSessionId(prefix: String): String {

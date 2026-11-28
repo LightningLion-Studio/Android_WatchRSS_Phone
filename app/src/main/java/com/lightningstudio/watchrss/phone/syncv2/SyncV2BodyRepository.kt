@@ -6,6 +6,8 @@ import com.lightningstudio.watchrss.phone.data.book.BookPackageFiles
 import com.lightningstudio.watchrss.phone.data.local.ConditionalBodyFile
 import com.lightningstudio.watchrss.phone.data.book.BookSync
 import com.lightningstudio.watchrss.phone.data.note.NoteAssetFiles
+import com.lightningstudio.watchrss.phone.data.book.SMALL_BOOK_JSON
+import com.lightningstudio.watchrss.phone.data.book.readStoredBookJson
 import org.json.JSONObject
 import java.io.DataInputStream
 import java.io.File
@@ -112,14 +114,13 @@ internal class SyncV2BodyRepository(private val db:SupportSQLiteDatabase,private
 
     private fun bookReference(id: String, selected: JSONObject): BookReference? =
         db.controlQuery(
-            """SELECT packageSha256,packageBytes,json_array(
-                json_extract(stateJson,'$.bookId'),json_extract(stateJson,'$.instanceId'),json_extract(stateJson,'$.fingerprint'),
-                json_extract(stateJson,'$.chapterCount'),json_extract(stateJson,'$.lifecycle'))
-                FROM imported_books WHERE bookId=? AND json_extract(stateJson,'$.deleted')=0""",
+            "SELECT packageSha256,packageBytes,$SMALL_BOOK_JSON FROM imported_books WHERE bookId=?",
             arrayOf(id)
         ).use { row ->
             if (!row.moveToFirst()) return@use null
-            val current = SyncV2Codec.canonical(org.json.JSONArray(row.getString(2)))
+            val state = JSONObject(readStoredBookJson({ sql, args -> db.controlQuery(sql, args) }, id, row.getString(2)))
+            if (state.opt("deleted") != false && state.opt("deleted") != 0) return@use null
+            val current = bookIdentity(state)
             if (current != bookIdentity(selected)) SyncV2Codec.fail("body_revision_changed")
             BookReference(BookPackageFiles.Revision(row.getString(0), row.getLong(1)), current,
                 BookPackageFiles.publication(db, id))

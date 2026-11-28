@@ -4,6 +4,8 @@ import androidx.room.Database
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.lightningstudio.watchrss.phone.data.book.bookSourceUrl
+import com.lightningstudio.watchrss.phone.data.book.readStoredBookJson
 import com.lightningstudio.watchrss.phone.data.model.ImportedContentIds
 import com.lightningstudio.watchrss.phone.data.reader.ReaderBackgroundAssetEntity
 import com.lightningstudio.watchrss.phone.data.reader.ReaderDeletionEntity
@@ -50,7 +52,7 @@ import com.lightningstudio.watchrss.phone.data.note.NoteFolderEntity
         com.lightningstudio.watchrss.phone.data.book.BookReadingPeerEntity::class,
         com.lightningstudio.watchrss.phone.data.book.BookCaptureMetaEntity::class
     ],
-    version = 20,
+    version = 21,
     exportSchema = false
 )
 abstract class PhoneCompanionDatabase : RoomDatabase() {
@@ -90,6 +92,35 @@ abstract class PhoneCompanionDatabase : RoomDatabase() {
                 com.lightningstudio.watchrss.phone.syncv2.SyncV2Schema.onOpen(db)
             }
         }
+        val MIGRATION_20_21 = object : Migration(20, 21) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                // Remove the old guards before any business write can compile them on Android 11.
+                for (domain in listOf("library", "books")) {
+                    for (op in listOf("INSERT", "UPDATE", "DELETE")) {
+                        database.execSQL("DROP TRIGGER IF EXISTS ble_fast_phone_rss_sources_${domain}_$op")
+                    }
+                }
+                database.execSQL("ALTER TABLE imported_books ADD COLUMN sourceUrl TEXT DEFAULT NULL")
+                var after: String? = null
+                while (true) {
+                    val where = if (after == null) "" else "WHERE bookId>?"
+                    val ids = database.query("SELECT bookId FROM imported_books $where ORDER BY bookId LIMIT 64",
+                        after?.let { arrayOf(it) } ?: emptyArray<String>()).use { rows ->
+                        buildList { while (rows.moveToNext()) add(rows.getString(0)) }
+                    }
+                    if (ids.isEmpty()) break
+                    for (id in ids) {
+                        val raw = readStoredBookJson(database::query, id, "")
+                        val source = bookSourceUrl(raw)
+                        if (source != null) database.execSQL(
+                            "UPDATE imported_books SET sourceUrl=? WHERE bookId=?", arrayOf(source, id)
+                        )
+                    }
+                    after = ids.last()
+                }
+            }
+        }
+
         val MIGRATION_19_20=object:Migration(19,20) {
             override fun migrate(database:SupportSQLiteDatabase) {
                 database.execSQL("CREATE TABLE IF NOT EXISTS note_remote_receipts (snapshotHash TEXT NOT NULL PRIMARY KEY,noteId TEXT NOT NULL)")

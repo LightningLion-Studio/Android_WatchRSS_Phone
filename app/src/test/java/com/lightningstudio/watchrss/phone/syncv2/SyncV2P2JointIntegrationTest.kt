@@ -309,7 +309,7 @@ class SyncV2P2JointIntegrationTest {
                 .put("contentHtml",JSONObject.NULL).put("url",bookHeader.getString("sourceUrl")+"/chapter/1")
             val original="$bookHeader\n$chapter\n".toByteArray()
             File(local,"imported_books/$bookId.jsonl").apply{parentFile!!.mkdirs();writeBytes(original)}
-            sql.execSQL("INSERT INTO imported_books VALUES(?,?,?,?)",arrayOf<Any>(
+            sql.execSQL("INSERT INTO imported_books(bookId,stateJson,packageSha256,packageBytes) VALUES(?,?,?,?)",arrayOf<Any>(
                 bookId,SyncV2Codec.canonical(book),SyncV2BodyCodec.hash(original),original.size))
             sql.execSQL("INSERT INTO notes VALUES(?,NULL,'Phone synthetic note','synthetic note','synthetic note','same-hash','same-hash','synthetic note',0,?,?,'phone-source',0,0)",arrayOf<Any>("$run-note",instant,instant))
             for(domain in SyncV2Schema.domains)while(!projection.scanPage(domain.table).complete){}

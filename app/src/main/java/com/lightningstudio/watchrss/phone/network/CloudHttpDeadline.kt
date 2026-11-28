@@ -60,11 +60,15 @@ internal class CloudCallCancellation private constructor(
     }
 
     fun <T> execute(call: Call, read: (Response) -> T): T {
+        return track(call) { call.execute().use(read) }
+    }
+
+    fun <T> track(call: Call, work: () -> T): T {
         deadline?.let { call.limitToDeadline(it.untilNanos) }
         activeCalls.add(call)
         try {
             checkActive()
-            return call.execute().use(read).also { checkActive() }
+            return work().also { checkActive() }
         } catch (error: Exception) {
             checkActive()
             throw error

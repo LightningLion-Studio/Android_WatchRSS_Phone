@@ -37,7 +37,7 @@ class NoteMergeR3SafetyTest {
     @Test fun upgradeAndReopenNormalizeOldDatabaseWithoutRemoteTraffic() = runBlocking {
         val name="notes-r3-upgrade-test.db";context.deleteDatabase(name)
         fun open()=Room.databaseBuilder(context,PhoneCompanionDatabase::class.java,name).allowMainThreadQueries()
-            .addMigrations(PhoneCompanionDatabase.MIGRATION_19_20)
+            .addMigrations(PhoneCompanionDatabase.MIGRATION_19_20,PhoneCompanionDatabase.MIGRATION_20_21)
             .addCallback(PhoneCompanionDatabase.ARTICLE_PROVENANCE_CALLBACK).build()
         try {
             open().let { db ->
@@ -48,6 +48,7 @@ class NoteMergeR3SafetyTest {
                 val old=MarkdownNoteCodec.sha256(listOf("n","a","b","c","peer").joinToString("\u0000"))
                 dao.upsertConflicts(listOf(c.copy(conflictId=old)))
                 dao.resolveConflict(c.conflictId,50)
+                db.openHelper.writableDatabase.execSQL("ALTER TABLE imported_books DROP COLUMN sourceUrl")
                 db.openHelper.writableDatabase.execSQL("DROP TABLE note_remote_receipts")
                 db.openHelper.writableDatabase.version=19
                 db.close()

@@ -1,6 +1,7 @@
 package com.lightningstudio.watchrss.phone.syncv2
 
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.lightningstudio.watchrss.phone.data.book.bookSourceUrl
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -126,6 +127,7 @@ internal class SyncV2PhoneApply(private val db:SupportSQLiteDatabase) {
                 "book"->{
                     val old=scalar("imported_books","bookId",v.getString("bookId"))
                     val row=JSONObject().put("bookId",v.get("bookId")).put("stateJson",SyncV2LocalJson.canonical(v))
+                        .put("sourceUrl", bookSourceUrl(v) ?: JSONObject.NULL)
                     if(old==null)row.put("packageSha256","").put("packageBytes",0)
                     upsert("imported_books",listOf("bookId"),row)
                 }

@@ -10,6 +10,8 @@ import com.lightningstudio.watchrss.phone.account.watchAccountConflictMessage
 import com.lightningstudio.watchrss.phone.data.db.PhoneArticleEntity
 import com.lightningstudio.watchrss.phone.data.db.PhoneLlmTokenUsageRepository
 import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog
+import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog.WatchLogCode
+import com.lightningstudio.watchrss.phone.data.log.BluetoothDebugLog.WatchLogStage
 import com.lightningstudio.watchrss.phone.data.model.PhoneSavedItemType
 import com.lightningstudio.watchrss.phone.data.note.MarkdownMergeResult
 import com.lightningstudio.watchrss.phone.data.note.NoteRepository
@@ -53,6 +55,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -196,6 +199,13 @@ class PhoneBluetoothSyncManager(
     internal suspend fun beginBtSync(trigger: BtSyncTrigger = BtSyncTrigger.MANUAL): BtSyncSession? {
         sessionInitScope.launch(Dispatchers.IO) { rolloutRepository.await()?.refreshIfStale() }
         return BtSyncTelemetry.beginWithBudget(appContext, sessionInitScope, trigger, SESSION_CONFIG_WAIT_MS, btSyncTelemetry)
+            ?.also { session ->
+                session.failureDiagnostic = { stage, code, version, versionCode ->
+                    withContext(NonCancellable + Dispatchers.IO) {
+                        debugLog.recordSyncFailure(stage, code, version, versionCode)
+                    }
+                }
+            }
     }
     /** P1 optional local projection copy; null leaves the legacy path byte-for-byte unchanged. */
     internal var recordLegacyProjection:((peer:String,version:Int,cursor:String,payload:JSONObject)->Unit)?=null
@@ -424,32 +434,61 @@ class PhoneBluetoothSyncManager(
     }
 
     /** Returns the newest part of the watch log. This is deliberately optional for sharing. */
-    suspend fun collectWatchDebugLog(): WatchDebugLog {
-        val targets = probeLibrarySyncTargets()
-        val device = targets.devices.singleOrNull()
-            ?: error(if (targets.devices.isEmpty()) "未连接到可用手表" else "发现多块手表，请先通过同步选择目标手表")
+    suspend fun collectWatchDebugLog(): WatchDebugLog = withContext(Dispatchers.IO) {
         val sessionId = BluetoothDebugLog.newSessionId("pullWatchLog")
-        return try {
+        var stage = WatchLogStage.PROBE
+        var code = WatchLogCode.PROBE_FAILED
+        var watchVersion: String? = null
+        var watchVersionCode: Int? = null
+        var lease: PhoneSyncSession? = null
+        try {
+            val targets = probeLibrarySyncTargets()
+            lease = targets.sessionLease
+            val device = targets.devices.singleOrNull() ?: if (targets.devices.isEmpty()) {
+                code = WatchLogCode.NO_WATCH
+                error("未连接到可用手表")
+            } else {
+                code = WatchLogCode.MULTIPLE_WATCHES
+                error("发现多块手表，请先通过同步选择目标手表")
+            }
+            watchVersion = device.appVersion ?: lease?.bindingProbe?.let(::watchAppVersion)
+            watchVersionCode = device.appVersionCode ?: lease?.bindingProbe?.let(::watchAppVersionCode)
+            stage = WatchLogStage.PULL
+            code = WatchLogCode.TRANSPORT_FAILED
             val request = JSONObject().apply {
                 put("version", LibrarySyncPayload.PROTOCOL_VERSION)
                 put("action", BluetoothSyncProtocol.ACTION_PULL_DEBUG_LOG)
                 put("maxChars", 700_000)
             }
-            val exchange = targets.sessionLease?.exchange(request, sessionId)
+            val exchange = lease?.exchange(request, sessionId)
                 ?: client.exchange(
                     request = request,
                     deviceAddress = device.address,
                     deviceNameHint = device.name,
                     sessionId = sessionId
                 )
-            requireSuccess(exchange.response)
+            val response = exchange.response
+            watchVersion = watchAppVersion(response) ?: watchVersion
+            watchVersionCode = watchAppVersionCode(response) ?: watchVersionCode
+            code = WatchLogCode.PEER_REJECTED
+            if (watchDebugLogForegroundRestricted(response)) {
+                code = WatchLogCode.FOREGROUND_RESTRICTED
+                throw WatchDebugLogForegroundRestricted()
+            }
+            requireSuccess(response)
+            stage = WatchLogStage.NONE
+            code = WatchLogCode.NONE
             WatchDebugLog(
-                text = exchange.response.optString("log"),
-                truncated = exchange.response.optBoolean("truncated")
+                text = response.optString("log"),
+                truncated = response.optBoolean("truncated")
             )
+        } catch (cancelled: CancellationException) {
+            code = WatchLogCode.CANCELLED
+            throw cancelled
         } finally {
-            targets.sessionLease?.runCatching { complete("$sessionId-complete") }
-            targets.sessionLease?.close()
+            debugLog.recordWatchLogCollection(stage, code, watchVersion, watchVersionCode)
+            lease?.runCatching { complete("$sessionId-complete") }
+            lease?.close()
         }
     }
 
@@ -2823,6 +2862,16 @@ class PhoneBluetoothSyncManager(
         private const val PREVIEW_ACTIVE_FRAME_INTERVAL_MS = 30L
         private const val PREVIEW_ACTIVE_TAIL_MS = 250L
     }
+}
+
+internal class WatchDebugLogForegroundRestricted :
+    IllegalStateException("请在手表上打开蓝牙连接页，然后重试收集手表日志。")
+
+internal fun watchDebugLogForegroundRestricted(response: JSONObject): Boolean {
+    if (response.optBoolean("success")) return false
+    val code = response.optString("errorCode").ifBlank { response.optString("error") }
+    return code == "foreground_restricted" || code == "foreground_required" ||
+        response.optString("message").contains("当前前台自动同步不支持此操作")
 }
 
 internal fun watchBluetoothFailureMessage(response: JSONObject): String {

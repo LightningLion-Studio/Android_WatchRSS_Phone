@@ -12,5 +12,10 @@ internal object SyncV2BodyIdentity {
             )
     }
     fun same(meta:JSONObject,other:JSONObject?):Boolean=other!=null&&witness(meta)==witness(other.getJSONObject("meta"))
+    /** The current live row already owns this exact book's independent reference. */
+    fun preservesBook(meta:JSONObject, prior:JSONObject?):Boolean {
+        val row=prior?.optJSONObject("row") ?: return false
+        return !row.getBoolean("deleted") && !row.isNull("bodyRevision") && same(meta,prior)
+    }
     fun carry(row:JSONObject,source:JSONObject?){for(field in fields)row.put(field,source?.get(field)?:JSONObject.NULL)}
 }

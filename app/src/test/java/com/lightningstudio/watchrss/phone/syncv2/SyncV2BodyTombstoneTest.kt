@@ -25,9 +25,12 @@ class SyncV2BodyTombstoneTest {
    fun write(deleted:Boolean){if(kind=="asset")apply.upsert("note_assets",listOf("assetId"),JSONObject().put("assetId","private-deleted").put("storageKey",id).put("mimeType","image/png").put("displayName",id).put("createdAt",if(deleted)2 else 1).put("deleted",deleted).put("deletedAt",if(deleted)2 else 0))
     else apply.upsert("imported_books",listOf("bookId"),JSONObject().put("bookId",id).put("stateJson",JSONObject(value.toString()).put("deleted",deleted).put("deletedAt",if(deleted)2 else 0).put("updatedAt",if(deleted)2 else 1).toString()))
    }
-   val client=f.f.client();val cloud=SyncV2CloudSync(client,f.identity,f.projection,{true},{f.key},{f.f.now});val entity=f.identity.entity(kind,id)
+   val client=f.f.client();val cloud=SyncV2CloudSync(client,f.identity,f.projection,{true},{f.key},{f.f.now},f.root);val entity=f.identity.entity(kind,id)
    if(description!="missing") {
-    write(false);f.drain();cloud.publishIndex(f.f.signer,f.key,1);f.actions().refresh()
+    write(false)
+    val seed=if(kind=="book")f.seedBookOriginal(id,"seed book original".toByteArray())else null
+    f.drain();cloud.publishIndex(f.f.signer,f.key,1);f.actions().refresh()
+    seed?.let{check(it.delete())}
     if(description!="promise") {
      // Authenticate a new account tree with unchanged business state. The body descriptor
      // can change independently, and its bytes can still be unavailable on this phone.

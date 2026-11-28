@@ -88,9 +88,9 @@ internal class SyncV2PhoneApply(private val db:SupportSQLiteDatabase) {
         }
     }
     /** Call only from accountWriter, after preparation and its final whole-state CAS. */
-    fun apply(before:List<JSONObject>,target:List<JSONObject>):SyncV2RssApply? {
+    fun apply(before:List<JSONObject>,target:List<JSONObject>,heldBooks:Set<String> = emptySet()):SyncV2RssApply? {
         check(db.inTransaction());validate(target)
-        val keep=target.map{it.getJSONObject("meta").getString("entityKey")}.toSet()
+        val keep=target.map{it.getJSONObject("meta").getString("entityKey")}.toSet()+heldBooks
         for(row in before) {
             val meta=row.getJSONObject("meta");if(meta.getString("entityKey") in keep)continue
             if(meta.getString("kind")=="rss-state")continue
@@ -105,7 +105,7 @@ internal class SyncV2PhoneApply(private val db:SupportSQLiteDatabase) {
         for(record in target) {
             val meta=record.getJSONObject("meta");val kind=meta.getString("kind")
             // F1/R3: an isolated row applies no business body: the local Room row survives untouched.
-            if(!record.has("value")||record.has(SyncV2NoteWiring.ISOLATED_KEY))continue
+            if(meta.getString("entityKey") in heldBooks || !record.has("value") || record.has(SyncV2NoteWiring.ISOLATED_KEY))continue
             val v=JSONObject(record.getJSONObject("value").toString())
             // A quarantined source may retain a local body after its edit was saved as a
             // fork. Reopening it must restore the authenticated note even if its candidate

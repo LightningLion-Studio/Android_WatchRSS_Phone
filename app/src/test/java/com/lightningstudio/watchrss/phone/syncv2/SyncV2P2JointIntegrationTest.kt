@@ -291,7 +291,7 @@ class SyncV2P2JointIntegrationTest {
             room=Room.databaseBuilder(RuntimeEnvironment.getApplication(),PhoneCompanionDatabase::class.java,File(local,"phone.db").absolutePath).allowMainThreadQueries().build()
             val localKey=SyncV2Codec.random(32);val projection=SyncV2Projection(room.openHelper.writableDatabase,identity,localKey,true).also{it.install()}
             reserveFixtureSequenceBlock(projection,signer.deviceId)
-            val sync=SyncV2CloudSync(client,identity,projection,{it in approved},{version->requireThat(version==1L,"unsupported_feature");wrap})
+            val sync=SyncV2CloudSync(client,identity,projection,{it in approved},{version->requireThat(version==1L,"unsupported_feature");wrap},files=local)
             step("repair-phone-synthetic-books")
             val repairClient=SyncV2CloudClient((f.getString("syncBaseUrl")+"/").toHttpUrl(),{session},trust,true)
             repairClient.capabilities();repairPhoneSyntheticBooks(repairClient,identity,projection,signer,authors,wrap)
@@ -303,7 +303,14 @@ class SyncV2P2JointIntegrationTest {
             val fingerprint=BookSync.fingerprint(listOf(BookSync.chapterHash(1,"Phone synthetic chapter","synthetic book body $run")))
             val bookId=BookSync.id(fingerprint)
             val book=JSONObject().put("bookId",bookId).put("fingerprint",fingerprint).put("title","Phone synthetic book").put("chapterCount",1).put("deletedChapters",JSONArray()).put("deletionClock",0).put("deleted",false).put("deletedAt",0).put("updatedAt",instant).put("sourceDeviceId","phone-source")
-            sql.execSQL("INSERT INTO imported_books VALUES(?,?,'synthetic-hash',?)",arrayOf<Any>(bookId,SyncV2Codec.canonical(book),instant))
+            val bookHeader=JSONObject().put("format","watchrss-book").put("version",1).put("title",book.getString("title"))
+                .put("chapterCount",1).put("kind","txt").put("sourceUrl","https://watchrss.local/import-txt-novel/$run")
+            val chapter=JSONObject().put("chapterIndex",1).put("title","Phone synthetic chapter").put("contentText","synthetic book body $run")
+                .put("contentHtml",JSONObject.NULL).put("url",bookHeader.getString("sourceUrl")+"/chapter/1")
+            val original="$bookHeader\n$chapter\n".toByteArray()
+            File(local,"imported_books/$bookId.jsonl").apply{parentFile!!.mkdirs();writeBytes(original)}
+            sql.execSQL("INSERT INTO imported_books VALUES(?,?,?,?)",arrayOf<Any>(
+                bookId,SyncV2Codec.canonical(book),SyncV2BodyCodec.hash(original),original.size))
             sql.execSQL("INSERT INTO notes VALUES(?,NULL,'Phone synthetic note','synthetic note','synthetic note','same-hash','same-hash','synthetic note',0,?,?,'phone-source',0,0)",arrayOf<Any>("$run-note",instant,instant))
             for(domain in SyncV2Schema.domains)while(!projection.scanPage(domain.table).complete){}
             record("localSeedRows",3)

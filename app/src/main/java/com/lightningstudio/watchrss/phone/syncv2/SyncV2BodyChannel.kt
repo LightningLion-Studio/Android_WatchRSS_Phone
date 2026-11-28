@@ -128,6 +128,7 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
         if(globalRetry.isFile) {val r=SyncV2Wire.parse(globalRetry.readBytes(),4096,true)
             if(SyncV2Wire.uint(r,"until")>now())return Result(1,listOf(r.getString("code")))}
         val anchor=anchor(account);var pending=0;val errors=linkedSetOf<String>()
+        val heldBooks=projection.heldBooks(st)
         var windowExpiry: Long? = null
         for (kind in listOf("asset", "book")) {
             var after = ""
@@ -135,6 +136,8 @@ internal class SyncV2BodyChannel(private val projection:SyncV2Projection,private
                 val page=projection.bodyCloudRowsPage(kind,after,16);if(page.isEmpty())break
                 for(entry in page) {val m=entry.getJSONObject("meta");val row=entry.getJSONObject("row")
                     if(m.getString("kind") !in setOf("book","asset") || row.getBoolean("deleted") || !row.isNull("recipeOid") || row.isNull("bodyRevision"))continue
+                    // A remote version cannot install an original over a different held Room row.
+                    if(row.getString("entityKey") in heldBooks)continue
                     val b=binding(entry);val dir=File(root,"${b.entityKey}/${b.bodyRevision}")
                     try {
                         val retry=File(dir,"retry.json");if(retry.isFile){val r=SyncV2Wire.parse(retry.readBytes(),4096,true);if(r.getLong("until")>now())throw SyncV2CloudError(r.getString("code"),true,r.getLong("until")-now())}

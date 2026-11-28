@@ -102,7 +102,7 @@ class SyncV2P5LargeP99Test {
         }
         val raw=File(evidence,"large-p99-events.ndjson");check(!raw.exists());val results=mutableMapOf<String,MutableList<JSONObject>>()
         try {
-            save();val publisher=SyncV2CloudSync(client,identity,projection,{it in approved},{key},now={now()});assertEquals("empty-account",publisher.readCurrent())
+            save();val publisher=SyncV2CloudSync(client,identity,projection,{it in approved},{key},now={now()},files=originals);assertEquals("empty-account",publisher.readCurrent())
             val schema=javaClass.classLoader!!.getResourceAsStream("syncv2-business-schema.json")!!.bufferedReader().use{JSONObject(it.readText())}.getJSONArray("records")
             fun value(kind:String)=JSONObject((0 until schema.length()).map{schema.getJSONObject(it)}.single{it.getString("kind")==kind}.getJSONObject("value").toString())
             val note=value("note");val noteId=note.getString("noteId");val entity=identity.entity("note",noteId)

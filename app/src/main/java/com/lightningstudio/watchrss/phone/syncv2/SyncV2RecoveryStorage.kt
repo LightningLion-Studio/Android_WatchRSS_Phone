@@ -142,6 +142,9 @@ internal class SyncV2RecoveryStorage(private val projection:SyncV2Projection,pri
             else->false
         }
     }
+    fun isMissingBookOriginal(error: Exception): Boolean =
+        contentFailureReason(error) == "book_original_missing"
+
     fun contentReady(record: JSONObject): Boolean = contentFailure(record) == null
 
     fun contentFailure(record: JSONObject, onUnregisteredNoteAsset: ((String) -> Unit)? = null): Exception? {

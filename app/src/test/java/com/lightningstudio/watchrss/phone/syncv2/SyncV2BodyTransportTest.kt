@@ -554,7 +554,7 @@ class SyncV2BodyTransportTest {
                 f.projection.bindArticleRevision(f.projection.wireContentRow(entity)!!,
                     SyncV2BodyCodec.revision(kind, entity, SyncV2BodyCodec.hash(original)), true)
             }
-            SyncV2CloudSync(client, f.identity, f.projection, { true }, { f.key }, { f.f.now })
+            SyncV2CloudSync(client, f.identity, f.projection, { true }, { f.key }, { f.f.now }, files)
                 .publishIndex(f.f.signer, f.key, 1)
             f.actions().refresh()
             val accepted = f.projection.state()
@@ -781,10 +781,12 @@ class SyncV2BodyTransportTest {
             val apply=SyncV2PhoneApply(f.sql)
             if(kind=="book")apply.upsert("imported_books",listOf("bookId"),JSONObject().put("bookId",id).put("stateJson",value.toString()))
             else apply.upsert("note_assets",listOf("assetId"),JSONObject().put("assetId","private-rename").put("storageKey",id).put("mimeType","image/png").put("displayName","original title").put("createdAt",1).put("deleted",false).put("deletedAt",0))
+            val seed=if(kind=="book")f.seedBookOriginal(id,raw)else null
             f.drain();f.projection.prepareWireIndex(f.f.signer,f.key,1).close()
             val entity=f.identity.entity(kind,id);val rev=SyncV2BodyCodec.revision(kind,entity,SyncV2BodyCodec.hash(raw))
             f.projection.bindArticleRevision(f.projection.wireContentRow(entity)!!,rev,independent=true)
-            val cloud=SyncV2CloudSync(client,f.identity,f.projection,{true},{f.key},{f.f.now});cloud.publishIndex(f.f.signer,f.key,1);f.actions().refresh()
+            val cloud=SyncV2CloudSync(client,f.identity,f.projection,{true},{f.key},{f.f.now},f.root);cloud.publishIndex(f.f.signer,f.key,1);f.actions().refresh()
+            seed?.let{check(it.delete())}
             val old=f.projection.cloudRows(setOf(entity)).single().getJSONObject("row")
             val account=f.projection.state().body.getJSONObject("account");val anchor=JSONObject().put("commitOid",account.get("oid")).put("revision",account.get("revision")).put("rollbackGeneration",account.get("generation"))
             val prepared=SyncV2BodyCodec.prepare(f.identity.scope,anchor,SyncV2BodyCodec.Binding(kind,id,entity,rev),f.key,1,f.f.signer,raw)

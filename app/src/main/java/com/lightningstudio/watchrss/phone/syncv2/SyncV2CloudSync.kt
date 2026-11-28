@@ -2,11 +2,13 @@ package com.lightningstudio.watchrss.phone.syncv2
 
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 
 /** Index work has its own HTTP calls. No content worker or auth-polling mutex is acquired. */
 internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val identity:SyncV2Identity,
     private val projection:SyncV2Projection,approvedLegacyDevice:(String)->Boolean,private val contentKey:(Long)->ByteArray,
-    private val now:()->Long=System::currentTimeMillis) {
+    private val now:()->Long=System::currentTimeMillis,
+    private val files:File?=null) {
     private val authors=client.authors(identity,approvedLegacyDevice)
     /** Capabilities are the only source for the C7 server announcement (25.8 negotiation). */
     private fun capabilities():JSONObject=client.capabilities().also{projection.noteSegmentsServerAnnounced=client.noteSegmentsWrite()}
@@ -206,7 +208,10 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         val sparseRoot = if (resetAdditions) null else projection.sparsePublicationRoot(st)
         val ids = if (sparseRoot == null) null else
             (projection.publicationIds() + projection.publicationMergeIds() + extraIds).takeIf { it.size <= 64 }
-        val localIndex = projection.prepareWireIndex(signer, contentKey, keyVersion, resetAdditions, ids)
+        val originals=files?.let{SyncV2BodyRepository(projection.accountDatabase,it)}
+        val localIndex = projection.prepareWireIndex(signer, contentKey, keyVersion, resetAdditions, ids) { id,value ->
+            originals?.committedBook(id,value)!=null
+        }
         try {
         val preparedBodies = if (prepareContent?.invoke(ids) == true) {
             sourceCurrent()
@@ -230,10 +235,9 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
             val meta=cloud.getJSONObject("meta");val entity=meta.getString("entityKey")
             val row = cloud.getJSONObject("row")
             if (ids != null) previousWire[entity] = row
-            if(cloud.has(SyncV2NoteWiring.ISOLATED_KEY)) {
-                // F1/R3: an isolated row is already the authenticated verbatim row; the normal
-                // publish keeps it untouched and never interprets the local candidate against it.
-                mergedRows[entity]=cloud.getJSONObject("row")
+            if(entity in localIndex.heldBooks || cloud.has(SyncV2NoteWiring.ISOLATED_KEY)) {
+                // An isolated note or a held book cannot replace this authenticated row.
+                mergedRows[entity]=row
                 continue
             }
             val remoteState=cloud.getJSONObject("state")
@@ -350,7 +354,7 @@ internal class SyncV2CloudSync(private val client:SyncV2CloudClient,private val 
         val id=randomId();val old=if(account.isNull("commitOid"))null else account.getString("commitOid")
         val request=JSONObject().put("account",SyncV2CloudClient.refUpdate(signer,identity.scope,"refs/account/current",old,account.getString("revision"),oid,id,now()))
             .put("device",SyncV2CloudClient.refUpdate(signer,identity.scope,"refs/devices/${signer.deviceId}/index",own,revision,oid,id,now())).put("relayGrant",JSONObject.NULL)
-        projection.persistPublish(request,publishState.version)
+        projection.persistPublish(request,publishState.version,localIndex.heldBooks)
         val response = publishAttempt(request)
         projection.confirmPublish(request,response)
         if (observePublished != null) {

@@ -136,6 +136,14 @@ internal class SyncV2P5Fixture(private val lifetime:SyncV2Lifetime?=null,
         val oid=commit(values,current.getString("commitOid"),SyncV2Codec.next(current.getString("rollbackGeneration")),"rollback",target);setCurrent(oid,SyncV2Codec.next(current.getString("revision")));return oid
     }
     fun actions(enabled:Boolean=true,quota:Long=32L*1024*1024,fault:(String)->Unit={})=SyncV2AccountActions(f.client(),identity,projection,f.signer,{key},{it=="synthetic-phone"},root,enabled,{f.now},quota,fault=fault)
+    fun seedBookOriginal(bookId:String,bytes:ByteArray):File {
+        val original=SyncV2BodyRepository(sql,root).file("book",bookId)
+        original.parentFile!!.mkdirs()
+        original.writeBytes(bytes)
+        sql.execSQL("UPDATE imported_books SET packageSha256=?,packageBytes=? WHERE bookId=?",
+            arrayOf<Any>(SyncV2BodyCodec.hash(bytes),bytes.size,bookId))
+        return original
+    }
     fun start() {actions().refresh();drain()}
     fun drain(){repeat(20){if(!projection.runWindow().paused)return};error("scan did not finish")}
     fun edit(text:String="offline\nline\n") {sql.execSQL("UPDATE notes SET markdown=?,plainText=?,updatedAt=updatedAt+1 WHERE noteId='note'",arrayOf(text,text));drain()}

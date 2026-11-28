@@ -329,7 +329,7 @@ internal class SyncV2PhoneProduct(private val context:Context,private val databa
             val projection=life.guard {life.own(SyncV2Projection(db,identity,local,true,
                 noteSegments=BuildConfig.SYNC_OBJECTS_V2_NOTE_SEGMENTS,lifetime=life,sequenceAllocator=vault::reserve,resetSources=resetSources).also{it.install()})}
             val content=life.guard {life.own(SyncV2ContentStore(File(context.filesDir,"syncv2/$path"),identity.scopeJson,local.copyOf()))}
-            val cloud=SyncV2CloudSync(control,identity,projection,approved,ring::read,{time.now()?:System.currentTimeMillis()})
+            val cloud=SyncV2CloudSync(control,identity,projection,approved,ring::read,{time.now()?:System.currentTimeMillis()},context.filesDir)
             val actions=life.guard {life.own(SyncV2AccountActions(control,identity,projection,signer,ring::read,approved,context.filesDir,true,time::now,
                 noteSegmentsRead=BuildConfig.SYNC_OBJECTS_V2_NOTE_SEGMENTS,currentKeyVersion={ring.newestVersion},
                 // The projection commits on SupportSQLiteDatabase. Notify Room before sending the ACK.

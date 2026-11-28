@@ -249,7 +249,7 @@ class SyncV2ResetMigrationTest {
         SyncV2PhoneApply(w.sql).upsert("notes", listOf("noteId"), w.note(id, body).put("noteId", id))
 
     private fun cloud(w: SyncV2P5Fixture) =
-        SyncV2CloudSync(w.f.client(), w.identity, w.projection, { it == "synthetic-phone" }, { w.key }, { w.f.now })
+        SyncV2CloudSync(w.f.client(), w.identity, w.projection, { it == "synthetic-phone" }, { w.key }, { w.f.now }, w.root)
 
     private fun publishMigration(w: SyncV2P5Fixture) {
         val cloud = cloud(w)
